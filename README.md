@@ -217,8 +217,8 @@ hubspot-email-mcp/
 **config-brand-a.json:**
 ```json
 {
-  "hubspot_api_key": "pat-na1-xxxx-iwt-key",
-  "file_folder_path": "/iwt-email-images",
+  "hubspot_api_key": "pat-na1-xxxx-xxxx-xxxx",
+  "file_folder_path": "/email-images",
   "brand_guidelines_path": "brand-a-guidelines.json"
 }
 ```

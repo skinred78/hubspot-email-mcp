@@ -76,7 +76,7 @@ def get_hubspot_headers() -> Dict[str, str]:
 
 def apply_iwt_content_formatting(html: str) -> str:
     """
-    Apply IWT-specific content formatting patterns to HTML
+    Apply content formatting patterns to HTML
 
     This includes:
     - Adding spacing between paragraphs
@@ -89,7 +89,7 @@ def apply_iwt_content_formatting(html: str) -> str:
         html: The HTML content string
 
     Returns:
-        HTML with IWT content formatting applied
+        HTML with content formatting applied
     """
     import re
 
@@ -192,12 +192,12 @@ def apply_brand_styles_to_html(html: str) -> str:
         html: The HTML content string
 
     Returns:
-        HTML wrapped with inline styles and IWT content formatting
+        HTML wrapped with inline styles and content formatting
     """
     if not brand_guidelines:
         return html
 
-    # First apply IWT content formatting patterns
+    # First apply content formatting patterns
     html = apply_iwt_content_formatting(html)
 
     typography = brand_guidelines.get("typography", {})
