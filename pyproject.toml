@@ -1,0 +1,20 @@
+[project]
+name = "hubspot-email-mcp"
+version = "0.1.0"
+description = "MCP server for creating HubSpot marketing emails from documents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "python-docx>=1.1.0",
+    "markdown>=3.5",
+    "requests>=2.31.0",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+hubspot-email-mcp = "hubspot_email_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

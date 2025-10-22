@@ -1,0 +1,44 @@
+{
+  "colors": {
+    "primary": "#197FC4",
+    "secondary": "#00a4bd",
+    "text": "#23496d",
+    "background": "#ffffff",
+    "border": "#000000"
+  },
+  "typography": {
+    "primaryFont": "Arial, sans-serif",
+    "secondaryFont": "Arial, sans-serif",
+    "headingOneFont": "Georgia, serif",
+    "headingTwoFont": "Georgia, serif",
+    "headingOneSize": 28,
+    "headingTwoSize": 22,
+    "headingLineHeight": 1.5,
+    "bodySize": 15,
+    "bodyLineHeight": 1.5,
+    "linkColor": "#00a4bd",
+    "linkUnderline": true
+  },
+  "spacing": {
+    "sectionPaddingTop": "40px",
+    "sectionPaddingBottom": "40px",
+    "modulePaddingTop": "20px",
+    "modulePaddingBottom": "20px"
+  },
+  "images": {
+    "defaultWidth": 600,
+    "maxWidth": "100%",
+    "alignment": "center",
+    "cornerRadius": 0,
+    "addBorder": false,
+    "borderWidth": 1,
+    "borderColor": "#000000",
+    "padding": "10px 20px"
+  },
+  "buttons": {
+    "backgroundColor": "#197FC4",
+    "textColor": "#ffffff",
+    "cornerRadius": 8,
+    "fontSize": 16
+  }
+}

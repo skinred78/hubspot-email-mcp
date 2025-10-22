@@ -1,0 +1,5 @@
+{
+  "hubspot_api_key": "YOUR_PRIVATE_APP_TOKEN",
+  "file_folder_path": "/email-images",
+  "brand_guidelines_path": "brand-guidelines.json"
+}

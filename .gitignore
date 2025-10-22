@@ -1,0 +1,45 @@
+# Configuration files with secrets
+config.json
+config-*.json
+!config.example.json
+
+# Brand-specific files
+*-brand-guidelines.json
+!brand-guidelines.example.json
+*-content-guide.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+test_*.docx
+test_*.md
+/tmp/
