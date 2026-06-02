@@ -1053,6 +1053,126 @@ def replace_images_in_html(html: str, image_map: Dict[str, str]) -> str:
     return html
 
 
+# ---------------------------------------------------------------------------
+# Inline-Markdown → ordered blocks (text / image / button) and the native-module
+# email-content builder. Reference shapes verified live (de-risk test 2026-06-02):
+#   custom module  → body.path = "<design-manager path>" + field values
+#   image          → body.path = "@hubspot/image_email" + body.img
+# ---------------------------------------------------------------------------
+
+# Button authored on its own line:  [[button: Label | https://url]]
+_BUTTON_RE = re.compile(r'^\s*\[\[\s*button\s*:\s*(?P<text>.+?)\s*\|\s*(?P<url>\S+?)\s*\]\]\s*$',
+                        re.IGNORECASE)
+# Standalone hosted-image line:  ![alt](https://...)
+_IMAGE_RE = re.compile(r'^\s*!\[(?P<alt>[^\]]*)\]\((?P<url>https?://[^)\s]+)\)\s*$')
+
+
+def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
+    """
+    Split inline Markdown into ordered content blocks for native-module emission:
+      ('text', html)              -> @hubspot/rich_text
+      ('image', {'src','alt'})    -> @hubspot/image_email
+      ('button', {'text','url'})  -> custom button module
+
+    Standalone-line images and [[button: ...]] markers become their own native modules;
+    everything else accumulates and renders to HTML as rich-text blocks. Non-https images
+    are left inside the text (remote mode cannot host local files).
+    """
+    blocks: List[Tuple] = []
+    text_buf: List[str] = []
+
+    def flush_text():
+        if text_buf:
+            md = "\n".join(text_buf).strip()
+            if md:
+                blocks.append(('text', markdown.markdown(md)))
+            text_buf.clear()
+
+    for line in body_markdown.splitlines():
+        mbtn = _BUTTON_RE.match(line)
+        mimg = _IMAGE_RE.match(line)
+        if mbtn:
+            flush_text()
+            blocks.append(('button', {'text': mbtn.group('text'), 'url': mbtn.group('url')}))
+        elif mimg:
+            flush_text()
+            blocks.append(('image', {'src': mimg.group('url'), 'alt': mimg.group('alt') or 'Image'}))
+        else:
+            text_buf.append(line)
+    flush_text()
+    if not blocks:
+        blocks.append(('text', markdown.markdown(body_markdown)))
+    return blocks
+
+
+def build_native_email_content(email_name: str, subject_line: str, blocks: List[Tuple],
+                               business_unit_id: Optional[str] = None) -> Dict:
+    """
+    Create a marketing-email draft whose body uses NATIVE HubSpot modules: @hubspot/rich_text,
+    @hubspot/image_email, the custom button module (config['button_module_path']), and
+    @hubspot/email_footer. All content modules live in ONE section (Gmail 102KB-clip
+    avoidance), mirroring the verified de-risk test. Returns {email_id, email_url, status}.
+    """
+    button_module_path = config.get("button_module_path", "edanz-email-modules/edanz-button.module")
+    headers = get_hubspot_headers()
+
+    payload = {"name": email_name, "subject": subject_line, "emailType": "BATCH_EMAIL"}
+    if business_unit_id:
+        payload["businessUnitId"] = business_unit_id
+    r = requests.post("https://api.hubapi.com/marketing/v3/emails", headers=headers, json=payload)
+    r.raise_for_status()
+    result = r.json()
+    email_id = result.get("id")
+    portal_id = result.get("portalId") or get_portal_id()
+
+    widgets: Dict[str, Dict] = {}
+    order_ids: List[str] = []
+    for i, (kind, data) in enumerate(blocks):
+        wid = f"module-{i}"
+        if kind == 'text':
+            body = {"path": "@hubspot/rich_text", "css_class": "dnd-module",
+                    "html": data, "schema_version": 2}
+        elif kind == 'image':
+            body = {"path": "@hubspot/image_email",
+                    "img": {"src": data["src"], "alt": data.get("alt", "Image")},
+                    "schema_version": 2}
+        elif kind == 'button':
+            body = {"path": button_module_path,
+                    "button_text": data["text"],
+                    "button_url": {"type": "EXTERNAL", "href": data["url"], "content_id": None},
+                    "schema_version": 2}
+        else:
+            continue
+        order_ids.append(wid)
+        widgets[wid] = {"id": wid, "name": wid, "type": "module", "order": i,
+                        "body": body, "css": {}, "child_css": {}, "styles": {}}
+
+    widgets["module-footer"] = {
+        "id": "module-footer", "name": "module-footer", "type": "module", "order": 999,
+        "body": {"path": "@hubspot/email_footer", "align": "center",
+                 "unsubscribe_link_type": "both", "schema_version": 2},
+        "css": {}, "child_css": {}, "styles": {},
+    }
+    order_ids.append("module-footer")
+
+    sections = [{"id": "section-0",
+                 "columns": [{"id": "column-0-0", "width": 12, "widgets": order_ids}],
+                 "style": {"paddingTop": "20px", "paddingBottom": "20px"}}]
+
+    patch = requests.patch(
+        f"https://api.hubapi.com/marketing/v3/emails/{email_id}/draft",
+        headers=headers,
+        json={"content": {"flexAreas": {"main": {"sections": sections}}, "widgets": widgets}},
+    )
+    if patch.status_code != 200:
+        logger.error(f"Draft content update failed: {patch.text[:500]}")
+    patch.raise_for_status()
+
+    return {"email_id": str(email_id),
+            "email_url": f"https://app.hubspot.com/email/{portal_id}/edit/{email_id}",
+            "status": "draft"}
+
+
 @mcp.tool()
 def create_email_draft(
     subject: str,
@@ -1070,9 +1190,10 @@ def create_email_draft(
 
     Args:
         subject: Email subject line.
-        body_markdown: Email body as Markdown. Images must be already-hosted https URLs
-            (they render inline via the rich-text module); local image paths are not
-            supported in remote mode.
+        body_markdown: Email body as Markdown, rendered into NATIVE HubSpot modules:
+            text → rich_text; a standalone `![alt](https://…)` line → @hubspot/image_email;
+            a standalone `[[button: Label | https://url]]` line → the branded button module.
+            Images must be already-hosted https URLs (no local files in remote mode).
         brand: Optional brand key (e.g. 'edanz') mapped to a HubSpot Business Unit via
             config['brands']. Omit for the default / single-BU portal.
         email_name: Optional internal name shown in the HubSpot dashboard. Defaults to subject.
@@ -1085,14 +1206,15 @@ def create_email_draft(
     business_unit_id = resolve_business_unit(brand)
     name = email_name or subject
 
-    # Markdown -> HTML. Already-hosted https images survive as <img> tags inside the
-    # rich-text module; there are no local images to upload in remote mode.
-    html = markdown.markdown(body_markdown)
-    content_blocks = [('text', html)]
+    # Parse into ordered native-module blocks (text / image / button).
+    blocks = parse_inline_markdown_to_blocks(body_markdown)
+    counts: Dict[str, int] = {}
+    for _kind, _ in blocks:
+        counts[_kind] = counts.get(_kind, 0) + 1
 
-    logger.info(f"Creating draft: name={name!r} brand={brand!r} bu={business_unit_id!r}")
+    logger.info(f"Creating draft: name={name!r} brand={brand!r} bu={business_unit_id!r} blocks={counts}")
     try:
-        result = create_hubspot_email_from_blocks(name, subject, content_blocks, business_unit_id=business_unit_id)
+        result = build_native_email_content(name, subject, blocks, business_unit_id=business_unit_id)
     except Exception as e:
         audit_log({"event": "create_email_draft", "status": "error", "brand": brand,
                    "email_name": name, "subject": subject, "error": str(e)})
@@ -1108,6 +1230,7 @@ def create_email_draft(
         "email_id": result.get("email_id"),
         "email_name": name,
         "subject": subject,
+        "blocks": counts,
         "preheader": preheader,
     })
     logger.info(f"Draft created: {result.get('email_url')}")
