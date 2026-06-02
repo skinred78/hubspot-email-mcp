@@ -125,6 +125,35 @@ def resolve_business_unit(brand: Optional[str]) -> Optional[str]:
     return brands[brand].get("business_unit_id")
 
 
+_portal_id_cache: Optional[str] = None
+
+
+def get_portal_id() -> str:
+    """
+    Return the HubSpot portal (hub) ID, used to build the draft edit URL.
+
+    The marketing-email create response does NOT include portalId, which produced a broken
+    '/email//edit/...' link. Resolve it once via the account-info API and cache it. Prefers
+    an explicit config['portal_id'] if set; degrades to '' on failure (URL still usable minus
+    the portal segment).
+    """
+    global _portal_id_cache
+    if _portal_id_cache is not None:
+        return _portal_id_cache
+    if config.get("portal_id"):
+        _portal_id_cache = str(config["portal_id"])
+        return _portal_id_cache
+    try:
+        r = requests.get("https://api.hubapi.com/account-info/v3/details",
+                         headers=get_hubspot_headers(), timeout=30)
+        r.raise_for_status()
+        _portal_id_cache = str(r.json().get("portalId", ""))
+    except Exception as e:
+        logger.warning(f"Could not resolve portal ID for draft URL: {e}")
+        _portal_id_cache = ""
+    return _portal_id_cache
+
+
 def apply_iwt_content_formatting(html: str) -> str:
     """
     Apply content formatting patterns to HTML
@@ -629,7 +658,7 @@ def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content
         result = response.json()
 
         email_id = result.get('id')
-        portal_id = result.get('portalId', '')
+        portal_id = result.get('portalId') or get_portal_id()
 
         logger.info(f"Email created with ID: {email_id}")
 
@@ -825,7 +854,7 @@ def create_hubspot_email(email_name: str, subject_line: str, html_body: str, ima
         result = response.json()
 
         email_id = result.get('id')
-        portal_id = result.get('portalId', '')
+        portal_id = result.get('portalId') or get_portal_id()
 
         logger.info(f"Email created with ID: {email_id}, template: {result.get('content', {}).get('templatePath')}")
 
