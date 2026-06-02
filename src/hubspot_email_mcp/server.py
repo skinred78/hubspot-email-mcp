@@ -1113,7 +1113,13 @@ def build_native_email_content(email_name: str, subject_line: str, blocks: List[
     @hubspot/email_footer. All content modules live in ONE section (Gmail 102KB-clip
     avoidance), mirroring the verified de-risk test. Returns {email_id, email_url, status}.
     """
-    button_module_path = config.get("button_module_path", "edanz-email-modules/edanz-button.module")
+    # Custom modules render in the marketing-email module-tree ONLY when referenced with a
+    # LEADING SLASH and WITHOUT the .module extension (verified 2026-06-03: of "/path/name",
+    # "path/name", and "path/name.module", only the leading-slash, no-extension form rendered).
+    _raw_btn = config.get("button_module_path", "edanz-email-modules/edanz-button.module")
+    button_module_path = "/" + _raw_btn.lstrip("/")
+    if button_module_path.endswith(".module"):
+        button_module_path = button_module_path[: -len(".module")]
     headers = get_hubspot_headers()
 
     payload = {"name": email_name, "subject": subject_line, "emailType": "BATCH_EMAIL"}
