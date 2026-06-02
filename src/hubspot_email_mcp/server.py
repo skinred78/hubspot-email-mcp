@@ -5,6 +5,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from datetime import datetime, timezone
 import logging
 
 import requests
@@ -38,10 +39,17 @@ def load_config():
     with open(config_path, 'r') as f:
         config = json.load(f)
 
-    required_fields = ["hubspot_api_key", "file_folder_path"]
-    for field in required_fields:
-        if field not in config:
-            raise ValueError(f"Missing required config field: {field}")
+    # hubspot_api_key is the only hard requirement. file_folder_path is only used by
+    # the legacy local-file path (create_marketing_email); the remote inline tool
+    # (create_email_draft) does not need it, so default it rather than require it.
+    if "hubspot_api_key" not in config:
+        raise ValueError("Missing required config field: hubspot_api_key")
+    config.setdefault("file_folder_path", "/email-images")
+
+    # Optional: brand -> {business_unit_id, name_prefix?} map for multi-BU routing.
+    # Optional: audit_log_path for the structured per-call attribution log (decision #6).
+    config.setdefault("brands", {})
+    config.setdefault("audit_log_path", "")
 
     # Load brand guidelines if specified
     brand_guidelines_path = config.get("brand_guidelines_path")
@@ -72,6 +80,49 @@ def get_hubspot_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {config['hubspot_api_key']}",
         "Content-Type": "application/json"
     }
+
+
+def audit_log(event: Dict) -> None:
+    """
+    Append a structured JSON line to the audit log.
+
+    Under the shared service-account token model (architecture decision #6), HubSpot's
+    own audit trail attributes every draft to the service account. This log is the ONLY
+    place per-user / per-brand attribution survives, so it is written on every draft call.
+
+    Always stamps `ts` (UTC ISO 8601). Falls back to stderr logging if no audit_log_path
+    is configured or the write fails — auditing must never silently disappear.
+    """
+    event = {"ts": datetime.now(timezone.utc).isoformat(), **event}
+    line = json.dumps(event, ensure_ascii=False)
+    path = config.get("audit_log_path")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            return
+        except Exception as e:
+            logger.error(f"Audit log write failed ({path}): {e}")
+    # Fallback: at least emit it to the process log so the host can capture it.
+    logger.info(f"AUDIT {line}")
+
+
+def resolve_business_unit(brand: Optional[str]) -> Optional[str]:
+    """
+    Map a brand key (e.g. 'edanz') to a HubSpot businessUnitId from config['brands'].
+
+    Returns None when no brand is given or no mapping exists (single-BU / default portal).
+    Raises if a brand IS given but unknown — fail loud rather than silently draft into the
+    wrong business unit.
+    """
+    if not brand:
+        return None
+    brands = config.get("brands", {})
+    if brand not in brands:
+        raise ValueError(
+            f"Unknown brand '{brand}'. Configured brands: {sorted(brands.keys()) or '(none)'}"
+        )
+    return brands[brand].get("business_unit_id")
 
 
 def apply_iwt_content_formatting(html: str) -> str:
@@ -538,7 +589,7 @@ def upload_image_to_hubspot(image_bytes: bytes, filename: str) -> Optional[str]:
         return None
 
 
-def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content_blocks: List[Tuple]) -> Dict:
+def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content_blocks: List[Tuple], business_unit_id: Optional[str] = None) -> Dict:
     """
     Create a marketing email draft in HubSpot from content blocks
 
@@ -566,6 +617,11 @@ def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content
             "subject": subject_line,
             "emailType": "BATCH_EMAIL"
         }
+        # Route the draft into a brand's Business Unit when configured (architecture decision #2).
+        # NOTE: verify the exact field/placement for businessUnitId on POST /marketing/v3/emails
+        # against the current HubSpot API before trusting multi-BU routing in production.
+        if business_unit_id:
+            payload["businessUnitId"] = business_unit_id
 
         logger.info(f"Creating email with name: {email_name}")
         response = requests.post(url, headers=headers, json=payload)
@@ -969,6 +1025,67 @@ def replace_images_in_html(html: str, image_map: Dict[str, str]) -> str:
 
 
 @mcp.tool()
+def create_email_draft(
+    subject: str,
+    body_markdown: str,
+    brand: Optional[str] = None,
+    email_name: Optional[str] = None,
+    preheader: Optional[str] = None,
+) -> Dict:
+    """
+    Create a HubSpot marketing email DRAFT from inline Markdown content.
+
+    This is the remote / Claude.ai-web entry point: content is passed directly as a string
+    (no local-file access, unlike create_marketing_email). Sending is never exposed — the
+    result is always a draft for human review in HubSpot.
+
+    Args:
+        subject: Email subject line.
+        body_markdown: Email body as Markdown. Images must be already-hosted https URLs
+            (they render inline via the rich-text module); local image paths are not
+            supported in remote mode.
+        brand: Optional brand key (e.g. 'edanz') mapped to a HubSpot Business Unit via
+            config['brands']. Omit for the default / single-BU portal.
+        email_name: Optional internal name shown in the HubSpot dashboard. Defaults to subject.
+        preheader: Optional preview text. NOT YET WIRED to the API (see TODO) — accepted now
+            for a forward-compatible signature and recorded in the audit log.
+
+    Returns:
+        Dict with email_id, email_url, status ('draft'), and brand.
+    """
+    business_unit_id = resolve_business_unit(brand)
+    name = email_name or subject
+
+    # Markdown -> HTML. Already-hosted https images survive as <img> tags inside the
+    # rich-text module; there are no local images to upload in remote mode.
+    html = markdown.markdown(body_markdown)
+    content_blocks = [('text', html)]
+
+    logger.info(f"Creating draft: name={name!r} brand={brand!r} bu={business_unit_id!r}")
+    try:
+        result = create_hubspot_email_from_blocks(name, subject, content_blocks, business_unit_id=business_unit_id)
+    except Exception as e:
+        audit_log({"event": "create_email_draft", "status": "error", "brand": brand,
+                   "email_name": name, "subject": subject, "error": str(e)})
+        raise
+
+    result["brand"] = brand
+    # TODO(preheader): set preview text once the correct HubSpot email field is confirmed.
+    audit_log({
+        "event": "create_email_draft",
+        "status": result.get("status", "unknown"),
+        "brand": brand,
+        "business_unit_id": business_unit_id,
+        "email_id": result.get("email_id"),
+        "email_name": name,
+        "subject": subject,
+        "preheader": preheader,
+    })
+    logger.info(f"Draft created: {result.get('email_url')}")
+    return result
+
+
+@mcp.tool()
 def create_marketing_email(doc_path: str, email_name: str, subject_line: str) -> Dict:
     """
     Create a HubSpot marketing email draft from a document file
@@ -1040,8 +1157,14 @@ def main():
     # Load configuration
     load_config()
 
-    # Run the MCP server
-    mcp.run()
+    # Transport: 'stdio' (default — Claude Code / desktop) or 'streamable-http' (remote —
+    # Claude.ai web via a custom connector). For HTTP, host/port come from FastMCP settings
+    # (env FASTMCP_HOST / FASTMCP_PORT) and the server runs behind a TLS reverse proxy that
+    # enforces the shared-secret header (architecture item E).
+    # VERIFY 'streamable-http' is the correct transport string for the installed mcp SDK.
+    transport = os.environ.get("HUBSPOT_EMAIL_MCP_TRANSPORT", "stdio")
+    logger.info(f"Starting hubspot-email MCP (transport={transport})")
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":
