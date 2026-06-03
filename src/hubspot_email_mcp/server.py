@@ -1066,6 +1066,15 @@ _BUTTON_RE = re.compile(r'^\s*\[\[\s*button\s*:\s*(?P<text>.+?)\s*\|\s*(?P<url>\
 # Standalone hosted-image line:  ![alt](https://...)
 _IMAGE_RE = re.compile(r'^\s*!\[(?P<alt>[^\]]*)\]\((?P<url>https?://[^)\s]+)\)\s*$')
 
+# A drafter writes the literal token NAME (uppercase) for the recipient's first name;
+# it becomes a HubSpot personalization token with a safe fallback. Rendered inside rich_text.
+_PERSONALIZATION_TOKEN = "{{ personalization_token('contact.firstname', 'there') }}"
+
+
+def _apply_personalization(html: str) -> str:
+    """Replace the standalone uppercase placeholder NAME with a first-name personalization token."""
+    return re.sub(r'\bNAME\b', _PERSONALIZATION_TOKEN, html)
+
 
 def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
     """
@@ -1085,7 +1094,7 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
         if text_buf:
             md = "\n".join(text_buf).strip()
             if md:
-                blocks.append(('text', markdown.markdown(md)))
+                blocks.append(('text', _apply_personalization(markdown.markdown(md))))
             text_buf.clear()
 
     for line in body_markdown.splitlines():
@@ -1101,7 +1110,7 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
             text_buf.append(line)
     flush_text()
     if not blocks:
-        blocks.append(('text', markdown.markdown(body_markdown)))
+        blocks.append(('text', _apply_personalization(markdown.markdown(body_markdown))))
     return blocks
 
 
