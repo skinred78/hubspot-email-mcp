@@ -1116,28 +1116,25 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
 
 def build_native_email_content(email_name: str, subject_line: str, blocks: List[Tuple],
                                business_unit_id: Optional[str] = None,
-                               office_location_id: Optional[str] = None) -> Dict:
+                               office_location_id: Optional[str] = None,
+                               button_color: Optional[str] = None,
+                               footer_html: Optional[str] = None,
+                               footer_bg: Optional[str] = None) -> Dict:
     """
-    Create a marketing-email draft whose body uses NATIVE HubSpot modules: @hubspot/rich_text,
-    @hubspot/image_email, the custom button module (config['button_module_path']), and
-    @hubspot/email_footer. All content modules live in ONE section (Gmail 102KB-clip
-    avoidance), mirroring the verified de-risk test. Returns {email_id, email_url, status}.
+    Create a marketing-email draft using the SAME native modules Edanz's production emails use:
+      text   → @hubspot/rich_text
+      image  → @hubspot/image_email
+      button → native button module 1976948, styled with the brand colour (button_color)
+      footer → @hubspot/email_footer; when footer_html is given, display=custom with branded
+               HTML in a dark (footer_bg) section; otherwise the default account CAN-SPAM footer.
+    Content lives in one section (Gmail 102KB-clip avoidance); the footer is its own section.
+    Returns {email_id, email_url, status}.
     """
-    # Custom modules render in the marketing-email module-tree ONLY when referenced with a
-    # LEADING SLASH and WITHOUT the .module extension (verified 2026-06-03: of "/path/name",
-    # "path/name", and "path/name.module", only the leading-slash, no-extension form rendered).
-    _raw_btn = config.get("button_module_path", "edanz-email-modules/edanz-button.module")
-    button_module_path = "/" + _raw_btn.lstrip("/")
-    if button_module_path.endswith(".module"):
-        button_module_path = button_module_path[: -len(".module")]
     headers = get_hubspot_headers()
 
     payload = {"name": email_name, "subject": subject_line, "emailType": "BATCH_EMAIL"}
     if business_unit_id:
         payload["businessUnitId"] = business_unit_id
-    # Footer CAN-SPAM address comes from the office location (a HubSpot settings object),
-    # NOT the business unit. Set it per-brand when the brand has its own office location;
-    # otherwise HubSpot falls back to the account default.
     if office_location_id:
         payload["subscriptionDetails"] = {"officeLocationId": office_location_id}
     r = requests.post("https://api.hubapi.com/marketing/v3/emails", headers=headers, json=payload)
@@ -1146,39 +1143,62 @@ def build_native_email_content(email_name: str, subject_line: str, blocks: List[
     email_id = result.get("id")
     portal_id = result.get("portalId") or get_portal_id()
 
+    btn_color = button_color or "#0B5394"
+
+    # Content widgets (text / image / button) — one section.
     widgets: Dict[str, Dict] = {}
-    order_ids: List[str] = []
+    content_ids: List[str] = []
     for i, (kind, data) in enumerate(blocks):
         wid = f"module-{i}"
+        widget = {"id": wid, "name": wid, "type": "module", "order": i,
+                  "css": {}, "child_css": {}, "styles": {}}
         if kind == 'text':
-            body = {"path": "@hubspot/rich_text", "css_class": "dnd-module",
-                    "html": data, "schema_version": 2}
+            widget["body"] = {"path": "@hubspot/rich_text", "css_class": "dnd-module",
+                              "html": data, "schema_version": 2}
         elif kind == 'image':
-            body = {"path": "@hubspot/image_email",
-                    "img": {"src": data["src"], "alt": data.get("alt", "Image")},
-                    "schema_version": 2}
+            widget["body"] = {"path": "@hubspot/image_email",
+                              "img": {"src": data["src"], "alt": data.get("alt", "Image")},
+                              "schema_version": 2}
         elif kind == 'button':
-            body = {"path": button_module_path,
-                    "button_text": data["text"],
-                    "button_url": {"type": "EXTERNAL", "href": data["url"], "content_id": None},
-                    "schema_version": 2}
+            # HubSpot's native email button module (the same one Edanz production emails use),
+            # styled with the brand colour. Referenced by module_id, no path.
+            widget["module_id"] = 1976948
+            widget["body"] = {"module_id": 1976948, "text": data["text"], "destination": data["url"],
+                              "font_color": "#ffffff", "corner_radius": 6,
+                              "style": {"background_color": {"color": btn_color, "opacity": 100}},
+                              "schema_version": 2}
         else:
             continue
-        order_ids.append(wid)
-        widgets[wid] = {"id": wid, "name": wid, "type": "module", "order": i,
-                        "body": body, "css": {}, "child_css": {}, "styles": {}}
+        content_ids.append(wid)
+        widgets[wid] = widget
 
-    widgets["module-footer"] = {
-        "id": "module-footer", "name": "module-footer", "type": "module", "order": 999,
-        "body": {"path": "@hubspot/email_footer", "align": "center",
-                 "unsubscribe_link_type": "both", "schema_version": 2},
-        "css": {}, "child_css": {}, "styles": {},
-    }
-    order_ids.append("module-footer")
+    # Footer: branded custom HTML in a dark section when provided, else the default footer.
+    if footer_html:
+        widgets["module-footer"] = {
+            "id": "module-footer", "name": "module-footer", "type": "module", "order": 999,
+            "body": {"path": "@hubspot/email_footer", "display": "custom", "footer_html": footer_html,
+                     "align": "center", "unsubscribe_link_type": "both",
+                     "font": {"color": "#ffffff", "font": "Arial, sans-serif",
+                              "size": {"units": "px", "value": 12}},
+                     "schema_version": 2},
+            "css": {}, "child_css": {}, "styles": {}}
+        footer_style = {"backgroundColor": footer_bg or "#333333", "paddingTop": "24px", "paddingBottom": "24px"}
+    else:
+        widgets["module-footer"] = {
+            "id": "module-footer", "name": "module-footer", "type": "module", "order": 999,
+            "body": {"path": "@hubspot/email_footer", "align": "center",
+                     "unsubscribe_link_type": "both", "schema_version": 2},
+            "css": {}, "child_css": {}, "styles": {}}
+        footer_style = {"paddingTop": "0px", "paddingBottom": "0px"}
 
-    sections = [{"id": "section-0",
-                 "columns": [{"id": "column-0-0", "width": 12, "widgets": order_ids}],
-                 "style": {"paddingTop": "20px", "paddingBottom": "20px"}}]
+    sections = [
+        {"id": "section-content",
+         "columns": [{"id": "col-content", "width": 12, "widgets": content_ids}],
+         "style": {"paddingTop": "20px", "paddingBottom": "20px"}},
+        {"id": "section-footer",
+         "columns": [{"id": "col-footer", "width": 12, "widgets": ["module-footer"]}],
+         "style": footer_style},
+    ]
 
     patch = requests.patch(
         f"https://api.hubapi.com/marketing/v3/emails/{email_id}/draft",
@@ -1224,9 +1244,12 @@ def create_email_draft(
     Returns:
         Dict with email_id, email_url, status ('draft'), and brand.
     """
+    brand_cfg = (config.get("brands", {}).get(brand) or {}) if brand else {}
     business_unit_id = resolve_business_unit(brand)
-    # Optional per-brand office location (drives the footer address); falls back to account default.
-    office_location_id = (config.get("brands", {}).get(brand) or {}).get("office_location_id") if brand else None
+    office_location_id = brand_cfg.get("office_location_id")
+    button_color = brand_cfg.get("button_color")
+    footer_html = brand_cfg.get("footer_html")
+    footer_bg = brand_cfg.get("footer_bg")
     name = email_name or subject
 
     # Parse into ordered native-module blocks (text / image / button).
@@ -1238,7 +1261,8 @@ def create_email_draft(
     logger.info(f"Creating draft: name={name!r} brand={brand!r} bu={business_unit_id!r} blocks={counts}")
     try:
         result = build_native_email_content(name, subject, blocks, business_unit_id=business_unit_id,
-                                            office_location_id=office_location_id)
+                                            office_location_id=office_location_id, button_color=button_color,
+                                            footer_html=footer_html, footer_bg=footer_bg)
     except Exception as e:
         audit_log({"event": "create_email_draft", "status": "error", "brand": brand,
                    "email_name": name, "subject": subject, "error": str(e)})

@@ -1,12 +1,13 @@
 {
   "hubspot_api_key": "YOUR_PRIVATE_APP_TOKEN",
-  "file_folder_path": "/email-images",
-  "brand_guidelines_path": "brand-guidelines.json",
   "audit_log_path": "/var/log/hubspot-email-mcp/audit.jsonl",
   "brands": {
-    "edanz": { "business_unit_id": "YOUR_EDANZ_BU_ID" },
-    "scribendi": { "business_unit_id": "YOUR_SCRIBENDI_BU_ID" },
-    "liwen": { "business_unit_id": "YOUR_LIWEN_BU_ID" },
-    "weave": { "business_unit_id": "YOUR_WEAVE_BU_ID" }
+    "edanz": {
+      "business_unit_id": "YOUR_EDANZ_BU_ID",
+      "button_color": "#BA2532",
+      "footer_bg": "#333333",
+      "footer_html": "<p><span style=\"color:#ffffff;\"><em>Copyright © 2026 Brand Inc., All rights reserved.</em></span></p><p><span style=\"color:#ffffff;\">Unsubscribe <a href=\"{{ unsubscribe_link }}\" style=\"color:#ffffff;\" data-unsubscribe=\"true\">here</a></span></p>"
+    },
+    "scribendi": { "business_unit_id": "YOUR_SCRIBENDI_BU_ID" }
   }
 }
