@@ -1115,7 +1115,8 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
 
 
 def build_native_email_content(email_name: str, subject_line: str, blocks: List[Tuple],
-                               business_unit_id: Optional[str] = None) -> Dict:
+                               business_unit_id: Optional[str] = None,
+                               office_location_id: Optional[str] = None) -> Dict:
     """
     Create a marketing-email draft whose body uses NATIVE HubSpot modules: @hubspot/rich_text,
     @hubspot/image_email, the custom button module (config['button_module_path']), and
@@ -1134,6 +1135,11 @@ def build_native_email_content(email_name: str, subject_line: str, blocks: List[
     payload = {"name": email_name, "subject": subject_line, "emailType": "BATCH_EMAIL"}
     if business_unit_id:
         payload["businessUnitId"] = business_unit_id
+    # Footer CAN-SPAM address comes from the office location (a HubSpot settings object),
+    # NOT the business unit. Set it per-brand when the brand has its own office location;
+    # otherwise HubSpot falls back to the account default.
+    if office_location_id:
+        payload["subscriptionDetails"] = {"officeLocationId": office_location_id}
     r = requests.post("https://api.hubapi.com/marketing/v3/emails", headers=headers, json=payload)
     r.raise_for_status()
     result = r.json()
@@ -1219,6 +1225,8 @@ def create_email_draft(
         Dict with email_id, email_url, status ('draft'), and brand.
     """
     business_unit_id = resolve_business_unit(brand)
+    # Optional per-brand office location (drives the footer address); falls back to account default.
+    office_location_id = (config.get("brands", {}).get(brand) or {}).get("office_location_id") if brand else None
     name = email_name or subject
 
     # Parse into ordered native-module blocks (text / image / button).
@@ -1229,7 +1237,8 @@ def create_email_draft(
 
     logger.info(f"Creating draft: name={name!r} brand={brand!r} bu={business_unit_id!r} blocks={counts}")
     try:
-        result = build_native_email_content(name, subject, blocks, business_unit_id=business_unit_id)
+        result = build_native_email_content(name, subject, blocks, business_unit_id=business_unit_id,
+                                            office_location_id=office_location_id)
     except Exception as e:
         audit_log({"event": "create_email_draft", "status": "error", "brand": brand,
                    "email_name": name, "subject": subject, "error": str(e)})
