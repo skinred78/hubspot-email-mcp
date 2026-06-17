@@ -1412,11 +1412,9 @@ def main():
         import uvicorn
 
         api_key = os.environ.get("HUBSPOT_EMAIL_MCP_API_KEY", "")
-        if not api_key:
-            raise ValueError("HUBSPOT_EMAIL_MCP_API_KEY must be set when using streamable-http transport")
-
         starlette_app = mcp.streamable_http_app()
-        app = _BearerAuthMiddleware(starlette_app, api_key)
+        # Only gate requests if a key is configured; omit for open internal deploys.
+        app = _BearerAuthMiddleware(starlette_app, api_key) if api_key else starlette_app
 
         host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
         # Railway injects PORT; fall back to FASTMCP_PORT then 8000.
