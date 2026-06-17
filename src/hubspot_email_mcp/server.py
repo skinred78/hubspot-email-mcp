@@ -5,6 +5,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from datetime import datetime, timezone
 import logging
 
 import requests
@@ -29,27 +30,48 @@ brand_guidelines = {}
 
 
 def load_config():
-    """Load configuration from environment variable"""
+    """Load configuration from a JSON file (local) or individual env vars (remote/Railway)."""
     global config, brand_guidelines
     config_path = os.environ.get("HUBSPOT_EMAIL_MCP_CONFIG")
-    if not config_path:
-        raise ValueError("HUBSPOT_EMAIL_MCP_CONFIG environment variable not set")
 
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    if config_path:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        # Env-var config path — used by Railway and other remote deployments.
+        # Set HUBSPOT_API_KEY and optionally HUBSPOT_BRANDS_JSON (a JSON object string).
+        api_key = os.environ.get("HUBSPOT_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "Either HUBSPOT_EMAIL_MCP_CONFIG (file path) or HUBSPOT_API_KEY must be set"
+            )
+        config["hubspot_api_key"] = api_key
+        brands_json = os.environ.get("HUBSPOT_BRANDS_JSON", "{}")
+        try:
+            config["brands"] = json.loads(brands_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"HUBSPOT_BRANDS_JSON is not valid JSON: {exc}") from exc
+        config["audit_log_path"] = os.environ.get("HUBSPOT_AUDIT_LOG_PATH", "")
+        config["file_folder_path"] = os.environ.get("HUBSPOT_FILE_FOLDER_PATH", "/email-images")
 
-    required_fields = ["hubspot_api_key", "file_folder_path"]
-    for field in required_fields:
-        if field not in config:
-            raise ValueError(f"Missing required config field: {field}")
+    # hubspot_api_key is the only hard requirement. file_folder_path is only used by
+    # the legacy local-file path (create_marketing_email); the remote inline tool
+    # (create_email_draft) does not need it, so default it rather than require it.
+    if "hubspot_api_key" not in config:
+        raise ValueError("Missing required config field: hubspot_api_key")
+    config.setdefault("file_folder_path", "/email-images")
+
+    # Optional: brand -> {business_unit_id, name_prefix?} map for multi-BU routing.
+    # Optional: audit_log_path for the structured per-call attribution log (decision #6).
+    config.setdefault("brands", {})
+    config.setdefault("audit_log_path", "")
 
     # Load brand guidelines if specified
     brand_guidelines_path = config.get("brand_guidelines_path")
     if brand_guidelines_path:
         try:
             # Support both absolute and relative paths
-            if not os.path.isabs(brand_guidelines_path):
-                # If relative, make it relative to the config file directory
+            if not os.path.isabs(brand_guidelines_path) and config_path:
                 config_dir = os.path.dirname(config_path)
                 brand_guidelines_path = os.path.join(config_dir, brand_guidelines_path)
 
@@ -72,6 +94,78 @@ def get_hubspot_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {config['hubspot_api_key']}",
         "Content-Type": "application/json"
     }
+
+
+def audit_log(event: Dict) -> None:
+    """
+    Append a structured JSON line to the audit log.
+
+    Under the shared service-account token model (architecture decision #6), HubSpot's
+    own audit trail attributes every draft to the service account. This log is the ONLY
+    place per-user / per-brand attribution survives, so it is written on every draft call.
+
+    Always stamps `ts` (UTC ISO 8601). Falls back to stderr logging if no audit_log_path
+    is configured or the write fails — auditing must never silently disappear.
+    """
+    event = {"ts": datetime.now(timezone.utc).isoformat(), **event}
+    line = json.dumps(event, ensure_ascii=False)
+    path = config.get("audit_log_path")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            return
+        except Exception as e:
+            logger.error(f"Audit log write failed ({path}): {e}")
+    # Fallback: at least emit it to the process log so the host can capture it.
+    logger.info(f"AUDIT {line}")
+
+
+def resolve_business_unit(brand: Optional[str]) -> Optional[str]:
+    """
+    Map a brand key (e.g. 'edanz') to a HubSpot businessUnitId from config['brands'].
+
+    Returns None when no brand is given or no mapping exists (single-BU / default portal).
+    Raises if a brand IS given but unknown — fail loud rather than silently draft into the
+    wrong business unit.
+    """
+    if not brand:
+        return None
+    brands = config.get("brands", {})
+    if brand not in brands:
+        raise ValueError(
+            f"Unknown brand '{brand}'. Configured brands: {sorted(brands.keys()) or '(none)'}"
+        )
+    return brands[brand].get("business_unit_id")
+
+
+_portal_id_cache: Optional[str] = None
+
+
+def get_portal_id() -> str:
+    """
+    Return the HubSpot portal (hub) ID, used to build the draft edit URL.
+
+    The marketing-email create response does NOT include portalId, which produced a broken
+    '/email//edit/...' link. Resolve it once via the account-info API and cache it. Prefers
+    an explicit config['portal_id'] if set; degrades to '' on failure (URL still usable minus
+    the portal segment).
+    """
+    global _portal_id_cache
+    if _portal_id_cache is not None:
+        return _portal_id_cache
+    if config.get("portal_id"):
+        _portal_id_cache = str(config["portal_id"])
+        return _portal_id_cache
+    try:
+        r = requests.get("https://api.hubapi.com/account-info/v3/details",
+                         headers=get_hubspot_headers(), timeout=30)
+        r.raise_for_status()
+        _portal_id_cache = str(r.json().get("portalId", ""))
+    except Exception as e:
+        logger.warning(f"Could not resolve portal ID for draft URL: {e}")
+        _portal_id_cache = ""
+    return _portal_id_cache
 
 
 def apply_iwt_content_formatting(html: str) -> str:
@@ -538,7 +632,7 @@ def upload_image_to_hubspot(image_bytes: bytes, filename: str) -> Optional[str]:
         return None
 
 
-def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content_blocks: List[Tuple]) -> Dict:
+def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content_blocks: List[Tuple], business_unit_id: Optional[str] = None) -> Dict:
     """
     Create a marketing email draft in HubSpot from content blocks
 
@@ -566,6 +660,11 @@ def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content
             "subject": subject_line,
             "emailType": "BATCH_EMAIL"
         }
+        # Route the draft into a brand's Business Unit when configured (architecture decision #2).
+        # NOTE: verify the exact field/placement for businessUnitId on POST /marketing/v3/emails
+        # against the current HubSpot API before trusting multi-BU routing in production.
+        if business_unit_id:
+            payload["businessUnitId"] = business_unit_id
 
         logger.info(f"Creating email with name: {email_name}")
         response = requests.post(url, headers=headers, json=payload)
@@ -573,7 +672,7 @@ def create_hubspot_email_from_blocks(email_name: str, subject_line: str, content
         result = response.json()
 
         email_id = result.get('id')
-        portal_id = result.get('portalId', '')
+        portal_id = result.get('portalId') or get_portal_id()
 
         logger.info(f"Email created with ID: {email_id}")
 
@@ -769,7 +868,7 @@ def create_hubspot_email(email_name: str, subject_line: str, html_body: str, ima
         result = response.json()
 
         email_id = result.get('id')
-        portal_id = result.get('portalId', '')
+        portal_id = result.get('portalId') or get_portal_id()
 
         logger.info(f"Email created with ID: {email_id}, template: {result.get('content', {}).get('templatePath')}")
 
@@ -968,6 +1067,238 @@ def replace_images_in_html(html: str, image_map: Dict[str, str]) -> str:
     return html
 
 
+# ---------------------------------------------------------------------------
+# Inline-Markdown → ordered blocks (text / image / button) and the native-module
+# email-content builder. Reference shapes verified live (de-risk test 2026-06-02):
+#   custom module  → body.path = "<design-manager path>" + field values
+#   image          → body.path = "@hubspot/image_email" + body.img
+# ---------------------------------------------------------------------------
+
+# Button authored on its own line:  [[button: Label | https://url]]
+_BUTTON_RE = re.compile(r'^\s*\[\[\s*button\s*:\s*(?P<text>.+?)\s*\|\s*(?P<url>\S+?)\s*\]\]\s*$',
+                        re.IGNORECASE)
+# Standalone hosted-image line:  ![alt](https://...)
+_IMAGE_RE = re.compile(r'^\s*!\[(?P<alt>[^\]]*)\]\((?P<url>https?://[^)\s]+)\)\s*$')
+
+# A drafter writes the literal token NAME (uppercase) for the recipient's first name;
+# it becomes a HubSpot personalization token with a safe fallback. Rendered inside rich_text.
+_PERSONALIZATION_TOKEN = "{{ personalization_token('contact.firstname', 'there') }}"
+
+
+def _apply_personalization(html: str) -> str:
+    """Replace the standalone uppercase placeholder NAME with a first-name personalization token."""
+    return re.sub(r'\bNAME\b', _PERSONALIZATION_TOKEN, html)
+
+
+def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
+    """
+    Split inline Markdown into ordered content blocks for native-module emission:
+      ('text', html)              -> @hubspot/rich_text
+      ('image', {'src','alt'})    -> @hubspot/image_email
+      ('button', {'text','url'})  -> custom button module
+
+    Standalone-line images and [[button: ...]] markers become their own native modules;
+    everything else accumulates and renders to HTML as rich-text blocks. Non-https images
+    are left inside the text (remote mode cannot host local files).
+    """
+    blocks: List[Tuple] = []
+    text_buf: List[str] = []
+
+    def flush_text():
+        if text_buf:
+            md = "\n".join(text_buf).strip()
+            if md:
+                blocks.append(('text', _apply_personalization(markdown.markdown(md))))
+            text_buf.clear()
+
+    for line in body_markdown.splitlines():
+        mbtn = _BUTTON_RE.match(line)
+        mimg = _IMAGE_RE.match(line)
+        if mbtn:
+            flush_text()
+            blocks.append(('button', {'text': mbtn.group('text'), 'url': mbtn.group('url')}))
+        elif mimg:
+            flush_text()
+            blocks.append(('image', {'src': mimg.group('url'), 'alt': mimg.group('alt') or 'Image'}))
+        else:
+            text_buf.append(line)
+    flush_text()
+    if not blocks:
+        blocks.append(('text', _apply_personalization(markdown.markdown(body_markdown))))
+    return blocks
+
+
+def build_native_email_content(email_name: str, subject_line: str, blocks: List[Tuple],
+                               business_unit_id: Optional[str] = None,
+                               office_location_id: Optional[str] = None,
+                               button_color: Optional[str] = None,
+                               footer_html: Optional[str] = None,
+                               footer_bg: Optional[str] = None) -> Dict:
+    """
+    Create a marketing-email draft using the SAME native modules Edanz's production emails use:
+      text   → @hubspot/rich_text
+      image  → @hubspot/image_email
+      button → native button module 1976948, styled with the brand colour (button_color)
+      footer → @hubspot/email_footer; when footer_html is given, display=custom with branded
+               HTML in a dark (footer_bg) section; otherwise the default account CAN-SPAM footer.
+    Content lives in one section (Gmail 102KB-clip avoidance); the footer is its own section.
+    Returns {email_id, email_url, status}.
+    """
+    headers = get_hubspot_headers()
+
+    payload = {"name": email_name, "subject": subject_line, "emailType": "BATCH_EMAIL"}
+    if business_unit_id:
+        payload["businessUnitId"] = business_unit_id
+    if office_location_id:
+        payload["subscriptionDetails"] = {"officeLocationId": office_location_id}
+    r = requests.post("https://api.hubapi.com/marketing/v3/emails", headers=headers, json=payload)
+    r.raise_for_status()
+    result = r.json()
+    email_id = result.get("id")
+    portal_id = result.get("portalId") or get_portal_id()
+
+    btn_color = button_color or "#0B5394"
+
+    # Content widgets (text / image / button) — one section.
+    widgets: Dict[str, Dict] = {}
+    content_ids: List[str] = []
+    for i, (kind, data) in enumerate(blocks):
+        wid = f"module-{i}"
+        widget = {"id": wid, "name": wid, "type": "module", "order": i,
+                  "css": {}, "child_css": {}, "styles": {}}
+        if kind == 'text':
+            widget["body"] = {"path": "@hubspot/rich_text", "css_class": "dnd-module",
+                              "html": data, "schema_version": 2}
+        elif kind == 'image':
+            widget["body"] = {"path": "@hubspot/image_email",
+                              "img": {"src": data["src"], "alt": data.get("alt", "Image")},
+                              "schema_version": 2}
+        elif kind == 'button':
+            # HubSpot's native email button module (the same one Edanz production emails use),
+            # styled with the brand colour. Referenced by module_id, no path.
+            widget["module_id"] = 1976948
+            widget["body"] = {"module_id": 1976948, "text": data["text"], "destination": data["url"],
+                              "font_color": "#ffffff", "corner_radius": 6,
+                              "style": {"background_color": {"color": btn_color, "opacity": 100}},
+                              "schema_version": 2}
+        else:
+            continue
+        content_ids.append(wid)
+        widgets[wid] = widget
+
+    # Footer: branded custom HTML in a dark section when provided, else the default footer.
+    if footer_html:
+        widgets["module-footer"] = {
+            "id": "module-footer", "name": "module-footer", "type": "module", "order": 999,
+            "body": {"path": "@hubspot/email_footer", "display": "custom", "footer_html": footer_html,
+                     "align": "center", "unsubscribe_link_type": "both",
+                     "font": {"color": "#ffffff", "font": "Arial, sans-serif",
+                              "size": {"units": "px", "value": 12}},
+                     "schema_version": 2},
+            "css": {}, "child_css": {}, "styles": {}}
+        footer_style = {"backgroundColor": footer_bg or "#333333", "paddingTop": "24px", "paddingBottom": "24px"}
+    else:
+        widgets["module-footer"] = {
+            "id": "module-footer", "name": "module-footer", "type": "module", "order": 999,
+            "body": {"path": "@hubspot/email_footer", "align": "center",
+                     "unsubscribe_link_type": "both", "schema_version": 2},
+            "css": {}, "child_css": {}, "styles": {}}
+        footer_style = {"paddingTop": "0px", "paddingBottom": "0px"}
+
+    sections = [
+        {"id": "section-content",
+         "columns": [{"id": "col-content", "width": 12, "widgets": content_ids}],
+         "style": {"paddingTop": "20px", "paddingBottom": "20px"}},
+        {"id": "section-footer",
+         "columns": [{"id": "col-footer", "width": 12, "widgets": ["module-footer"]}],
+         "style": footer_style},
+    ]
+
+    patch = requests.patch(
+        f"https://api.hubapi.com/marketing/v3/emails/{email_id}/draft",
+        headers=headers,
+        json={"content": {"flexAreas": {"main": {"sections": sections}}, "widgets": widgets}},
+    )
+    if patch.status_code != 200:
+        logger.error(f"Draft content update failed: {patch.text[:500]}")
+    patch.raise_for_status()
+
+    return {"email_id": str(email_id),
+            "email_url": f"https://app.hubspot.com/email/{portal_id}/edit/{email_id}",
+            "status": "draft"}
+
+
+@mcp.tool()
+def create_email_draft(
+    subject: str,
+    body_markdown: str,
+    brand: Optional[str] = None,
+    email_name: Optional[str] = None,
+    preheader: Optional[str] = None,
+) -> Dict:
+    """
+    Create a HubSpot marketing email DRAFT from inline Markdown content.
+
+    This is the remote / Claude.ai-web entry point: content is passed directly as a string
+    (no local-file access, unlike create_marketing_email). Sending is never exposed — the
+    result is always a draft for human review in HubSpot.
+
+    Args:
+        subject: Email subject line.
+        body_markdown: Email body as Markdown, rendered into NATIVE HubSpot modules:
+            text → rich_text; a standalone `![alt](https://…)` line → @hubspot/image_email;
+            a standalone `[[button: Label | https://url]]` line → the branded button module.
+            Images must be already-hosted https URLs (no local files in remote mode).
+        brand: Optional brand key (e.g. 'edanz') mapped to a HubSpot Business Unit via
+            config['brands']. Omit for the default / single-BU portal.
+        email_name: Optional internal name shown in the HubSpot dashboard. Defaults to subject.
+        preheader: Optional preview text. NOT YET WIRED to the API (see TODO) — accepted now
+            for a forward-compatible signature and recorded in the audit log.
+
+    Returns:
+        Dict with email_id, email_url, status ('draft'), and brand.
+    """
+    brand_cfg = (config.get("brands", {}).get(brand) or {}) if brand else {}
+    business_unit_id = resolve_business_unit(brand)
+    office_location_id = brand_cfg.get("office_location_id")
+    button_color = brand_cfg.get("button_color")
+    footer_html = brand_cfg.get("footer_html")
+    footer_bg = brand_cfg.get("footer_bg")
+    name = email_name or subject
+
+    # Parse into ordered native-module blocks (text / image / button).
+    blocks = parse_inline_markdown_to_blocks(body_markdown)
+    counts: Dict[str, int] = {}
+    for _kind, _ in blocks:
+        counts[_kind] = counts.get(_kind, 0) + 1
+
+    logger.info(f"Creating draft: name={name!r} brand={brand!r} bu={business_unit_id!r} blocks={counts}")
+    try:
+        result = build_native_email_content(name, subject, blocks, business_unit_id=business_unit_id,
+                                            office_location_id=office_location_id, button_color=button_color,
+                                            footer_html=footer_html, footer_bg=footer_bg)
+    except Exception as e:
+        audit_log({"event": "create_email_draft", "status": "error", "brand": brand,
+                   "email_name": name, "subject": subject, "error": str(e)})
+        raise
+
+    result["brand"] = brand
+    # TODO(preheader): set preview text once the correct HubSpot email field is confirmed.
+    audit_log({
+        "event": "create_email_draft",
+        "status": result.get("status", "unknown"),
+        "brand": brand,
+        "business_unit_id": business_unit_id,
+        "email_id": result.get("email_id"),
+        "email_name": name,
+        "subject": subject,
+        "blocks": counts,
+        "preheader": preheader,
+    })
+    logger.info(f"Draft created: {result.get('email_url')}")
+    return result
+
+
 @mcp.tool()
 def create_marketing_email(doc_path: str, email_name: str, subject_line: str) -> Dict:
     """
@@ -1035,13 +1366,64 @@ def create_marketing_email(doc_path: str, email_name: str, subject_line: str) ->
     return result
 
 
+class _BearerAuthMiddleware:
+    """Pure ASGI bearer-token gate for the streamable-http transport.
+
+    Passes /health unauthenticated (Railway health checks).
+    All other paths require Authorization: Bearer <HUBSPOT_EMAIL_MCP_API_KEY>.
+    """
+
+    def __init__(self, app, api_key: str) -> None:
+        self.app = app
+        self.api_key = api_key
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/health":
+                await send({
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"text/plain")],
+                })
+                await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+                return
+            headers = {k: v for k, v in scope.get("headers", [])}
+            auth = headers.get(b"authorization", b"").decode()
+            if auth != f"Bearer {self.api_key}":
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"text/plain")],
+                })
+                await send({"type": "http.response.body", "body": b"Unauthorized", "more_body": False})
+                return
+        await self.app(scope, receive, send)
+
+
 def main():
     """Main entry point"""
-    # Load configuration
     load_config()
 
-    # Run the MCP server
-    mcp.run()
+    transport = os.environ.get("HUBSPOT_EMAIL_MCP_TRANSPORT", "stdio")
+    logger.info(f"Starting hubspot-email MCP (transport={transport})")
+
+    if transport == "streamable-http":
+        import uvicorn
+
+        api_key = os.environ.get("HUBSPOT_EMAIL_MCP_API_KEY", "")
+        if not api_key:
+            raise ValueError("HUBSPOT_EMAIL_MCP_API_KEY must be set when using streamable-http transport")
+
+        starlette_app = mcp.streamable_http_app()
+        app = _BearerAuthMiddleware(starlette_app, api_key)
+
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        # Railway injects PORT; fall back to FASTMCP_PORT then 8000.
+        port = int(os.environ.get("PORT", os.environ.get("FASTMCP_PORT", "8000")))
+        uvicorn.run(app, host=host, port=port)
+    else:
+        mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

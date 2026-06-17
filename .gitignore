@@ -43,3 +43,9 @@ Thumbs.db
 test_*.docx
 test_*.md
 /tmp/
+
+# Local secrets / runtime (never commit the real token or audit data)
+config.local.json
+config.*.local.json
+audit.jsonl
+*.jsonl
