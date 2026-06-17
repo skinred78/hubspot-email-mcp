@@ -1,0 +1,6 @@
+.venv
+config.local.json
+*.jsonl
+__pycache__
+*.pyc
+.git

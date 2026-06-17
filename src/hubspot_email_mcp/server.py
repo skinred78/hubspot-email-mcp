@@ -30,14 +30,29 @@ brand_guidelines = {}
 
 
 def load_config():
-    """Load configuration from environment variable"""
+    """Load configuration from a JSON file (local) or individual env vars (remote/Railway)."""
     global config, brand_guidelines
     config_path = os.environ.get("HUBSPOT_EMAIL_MCP_CONFIG")
-    if not config_path:
-        raise ValueError("HUBSPOT_EMAIL_MCP_CONFIG environment variable not set")
 
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    if config_path:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        # Env-var config path — used by Railway and other remote deployments.
+        # Set HUBSPOT_API_KEY and optionally HUBSPOT_BRANDS_JSON (a JSON object string).
+        api_key = os.environ.get("HUBSPOT_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "Either HUBSPOT_EMAIL_MCP_CONFIG (file path) or HUBSPOT_API_KEY must be set"
+            )
+        config["hubspot_api_key"] = api_key
+        brands_json = os.environ.get("HUBSPOT_BRANDS_JSON", "{}")
+        try:
+            config["brands"] = json.loads(brands_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"HUBSPOT_BRANDS_JSON is not valid JSON: {exc}") from exc
+        config["audit_log_path"] = os.environ.get("HUBSPOT_AUDIT_LOG_PATH", "")
+        config["file_folder_path"] = os.environ.get("HUBSPOT_FILE_FOLDER_PATH", "/email-images")
 
     # hubspot_api_key is the only hard requirement. file_folder_path is only used by
     # the legacy local-file path (create_marketing_email); the remote inline tool
@@ -56,8 +71,7 @@ def load_config():
     if brand_guidelines_path:
         try:
             # Support both absolute and relative paths
-            if not os.path.isabs(brand_guidelines_path):
-                # If relative, make it relative to the config file directory
+            if not os.path.isabs(brand_guidelines_path) and config_path:
                 config_dir = os.path.dirname(config_path)
                 brand_guidelines_path = os.path.join(config_dir, brand_guidelines_path)
 
@@ -1352,19 +1366,64 @@ def create_marketing_email(doc_path: str, email_name: str, subject_line: str) ->
     return result
 
 
+class _BearerAuthMiddleware:
+    """Pure ASGI bearer-token gate for the streamable-http transport.
+
+    Passes /health unauthenticated (Railway health checks).
+    All other paths require Authorization: Bearer <HUBSPOT_EMAIL_MCP_API_KEY>.
+    """
+
+    def __init__(self, app, api_key: str) -> None:
+        self.app = app
+        self.api_key = api_key
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/health":
+                await send({
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"text/plain")],
+                })
+                await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+                return
+            headers = {k: v for k, v in scope.get("headers", [])}
+            auth = headers.get(b"authorization", b"").decode()
+            if auth != f"Bearer {self.api_key}":
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"text/plain")],
+                })
+                await send({"type": "http.response.body", "body": b"Unauthorized", "more_body": False})
+                return
+        await self.app(scope, receive, send)
+
+
 def main():
     """Main entry point"""
-    # Load configuration
     load_config()
 
-    # Transport: 'stdio' (default — Claude Code / desktop) or 'streamable-http' (remote —
-    # Claude.ai web via a custom connector). For HTTP, host/port come from FastMCP settings
-    # (env FASTMCP_HOST / FASTMCP_PORT) and the server runs behind a TLS reverse proxy that
-    # enforces the shared-secret header (architecture item E).
-    # VERIFY 'streamable-http' is the correct transport string for the installed mcp SDK.
     transport = os.environ.get("HUBSPOT_EMAIL_MCP_TRANSPORT", "stdio")
     logger.info(f"Starting hubspot-email MCP (transport={transport})")
-    mcp.run(transport=transport)
+
+    if transport == "streamable-http":
+        import uvicorn
+
+        api_key = os.environ.get("HUBSPOT_EMAIL_MCP_API_KEY", "")
+        if not api_key:
+            raise ValueError("HUBSPOT_EMAIL_MCP_API_KEY must be set when using streamable-http transport")
+
+        starlette_app = mcp.streamable_http_app()
+        app = _BearerAuthMiddleware(starlette_app, api_key)
+
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        # Railway injects PORT; fall back to FASTMCP_PORT then 8000.
+        port = int(os.environ.get("PORT", os.environ.get("FASTMCP_PORT", "8000")))
+        uvicorn.run(app, host=host, port=port)
+    else:
+        mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

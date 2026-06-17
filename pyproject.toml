@@ -10,6 +10,7 @@ dependencies = [
     "markdown>=3.5",
     "requests>=2.31.0",
     "Pillow>=10.0.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.scripts]
