@@ -3,6 +3,8 @@ import json
 import os
 import hashlib
 import re
+import secrets
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timezone
@@ -1366,39 +1368,99 @@ def create_marketing_email(doc_path: str, email_name: str, subject_line: str) ->
     return result
 
 
-class _BearerAuthMiddleware:
-    """Pure ASGI bearer-token gate for the streamable-http transport.
+class _SimpleOAuthProvider:
+    """Minimal in-memory OAuth 2.0 authorization server for Claude.ai connector auth.
 
-    Passes /health unauthenticated (Railway health checks).
-    All other paths require Authorization: Bearer <HUBSPOT_EMAIL_MCP_API_KEY>.
+    Supports dynamic client registration and the authorization code + PKCE flow.
+    The authorize step auto-approves — no login page — which is appropriate for an
+    internal tool where Claude.ai workspace membership is the trust boundary.
+
+    State is in-memory only; tokens are lost on server restart (team members
+    re-authorize automatically on next use).
     """
 
-    def __init__(self, app, api_key: str) -> None:
-        self.app = app
-        self.api_key = api_key
+    def __init__(self) -> None:
+        self._clients: dict = {}
+        self._codes: dict = {}
+        self._access_tokens: dict = {}
+        self._refresh_tokens: dict = {}
 
-    async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] == "http":
-            path = scope.get("path", "")
-            if path == "/health":
-                await send({
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [(b"content-type", b"text/plain")],
-                })
-                await send({"type": "http.response.body", "body": b"ok", "more_body": False})
-                return
-            headers = {k: v for k, v in scope.get("headers", [])}
-            auth = headers.get(b"authorization", b"").decode()
-            if auth != f"Bearer {self.api_key}":
-                await send({
-                    "type": "http.response.start",
-                    "status": 401,
-                    "headers": [(b"content-type", b"text/plain")],
-                })
-                await send({"type": "http.response.body", "body": b"Unauthorized", "more_body": False})
-                return
-        await self.app(scope, receive, send)
+    async def get_client(self, client_id: str):
+        return self._clients.get(client_id)
+
+    async def register_client(self, client_info) -> None:
+        self._clients[client_info.client_id] = client_info
+
+    async def authorize(self, client, params) -> str:
+        from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
+        code = secrets.token_urlsafe(32)
+        self._codes[code] = AuthorizationCode(
+            code=code,
+            scopes=params.scopes or [],
+            expires_at=time.time() + 300,
+            client_id=client.client_id,
+            code_challenge=params.code_challenge,
+            redirect_uri=params.redirect_uri,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+            resource=params.resource,
+        )
+        return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state)
+
+    async def load_authorization_code(self, client, authorization_code: str):
+        return self._codes.get(authorization_code)
+
+    async def exchange_authorization_code(self, client, authorization_code):
+        from mcp.server.auth.provider import AccessToken, RefreshToken
+        from mcp.shared.auth import OAuthToken
+        self._codes.pop(authorization_code.code, None)
+        access = secrets.token_urlsafe(32)
+        refresh = secrets.token_urlsafe(32)
+        self._access_tokens[access] = AccessToken(
+            token=access,
+            client_id=client.client_id,
+            scopes=authorization_code.scopes,
+            expires_at=None,
+            resource=authorization_code.resource,
+        )
+        self._refresh_tokens[refresh] = RefreshToken(
+            token=refresh,
+            client_id=client.client_id,
+            scopes=authorization_code.scopes,
+        )
+        return OAuthToken(
+            access_token=access,
+            token_type="bearer",
+            refresh_token=refresh,
+            scope=" ".join(authorization_code.scopes) if authorization_code.scopes else None,
+        )
+
+    async def load_refresh_token(self, client, refresh_token: str):
+        return self._refresh_tokens.get(refresh_token)
+
+    async def exchange_refresh_token(self, client, refresh_token, scopes):
+        from mcp.server.auth.provider import AccessToken, RefreshToken
+        from mcp.shared.auth import OAuthToken
+        self._refresh_tokens.pop(refresh_token.token, None)
+        access = secrets.token_urlsafe(32)
+        new_refresh = secrets.token_urlsafe(32)
+        effective_scopes = scopes or refresh_token.scopes
+        self._access_tokens[access] = AccessToken(
+            token=access, client_id=client.client_id, scopes=effective_scopes, expires_at=None,
+        )
+        self._refresh_tokens[new_refresh] = RefreshToken(
+            token=new_refresh, client_id=client.client_id, scopes=effective_scopes,
+        )
+        return OAuthToken(access_token=access, token_type="bearer", refresh_token=new_refresh)
+
+    async def load_access_token(self, token: str):
+        return self._access_tokens.get(token)
+
+    async def revoke_token(self, token) -> None:
+        from mcp.server.auth.provider import AccessToken
+        if isinstance(token, AccessToken):
+            self._access_tokens.pop(token.token, None)
+        else:
+            self._refresh_tokens.pop(token.token, None)
 
 
 def main():
@@ -1410,16 +1472,26 @@ def main():
 
     if transport == "streamable-http":
         import uvicorn
+        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+        from mcp.server.auth.provider import ProviderTokenVerifier
 
-        api_key = os.environ.get("HUBSPOT_EMAIL_MCP_API_KEY", "")
-        starlette_app = mcp.streamable_http_app()
-        # Only gate requests if a key is configured; omit for open internal deploys.
-        app = _BearerAuthMiddleware(starlette_app, api_key) if api_key else starlette_app
+        server_url = os.environ.get("SERVER_URL", "")
+        if server_url:
+            provider = _SimpleOAuthProvider()
+            mcp._auth_server_provider = provider
+            mcp._token_verifier = ProviderTokenVerifier(provider)
+            mcp.settings.auth = AuthSettings(
+                issuer_url=server_url,
+                resource_server_url=server_url,
+                client_registration_options=ClientRegistrationOptions(enabled=True),
+            )
+            logger.info(f"OAuth enabled — issuer: {server_url}")
+        else:
+            logger.warning("SERVER_URL not set — running without auth (internal use only)")
 
         host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
-        # Railway injects PORT; fall back to FASTMCP_PORT then 8000.
         port = int(os.environ.get("PORT", os.environ.get("FASTMCP_PORT", "8000")))
-        uvicorn.run(app, host=host, port=port)
+        uvicorn.run(mcp.streamable_http_app(), host=host, port=port)
     else:
         mcp.run(transport=transport)
 
