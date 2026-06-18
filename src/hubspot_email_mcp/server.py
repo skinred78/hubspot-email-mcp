@@ -1,4 +1,5 @@
 """HubSpot Email MCP Server - Create marketing emails from documents"""
+import base64
 import json
 import os
 import hashlib
@@ -1208,6 +1209,23 @@ _BUTTON_RE = re.compile(r'^\s*\[\[\s*button\s*:\s*(?P<text>.+?)\s*\|\s*(?P<url>\
                         re.IGNORECASE)
 # Standalone hosted-image line:  ![alt](https://...)
 _IMAGE_RE = re.compile(r'^\s*!\[(?P<alt>[^\]]*)\]\((?P<url>https?://[^)\s]+)\)\s*$')
+# Standalone inline base64 data-URI image line:  ![alt](data:image/png;base64,iVBOR...)
+# Lets Claude.ai attach generated images / pasted screenshots directly; uploaded to
+# HubSpot in create_email_draft AFTER parsing (the parser stays network-free).
+_DATA_IMAGE_RE = re.compile(
+    r'^\s*!\[(?P<alt>[^\]]*)\]\(\s*(?P<uri>data:image/[^;,\s]+;base64,[A-Za-z0-9+/=\s]+?)\s*\)\s*$'
+)
+
+# Map an image MIME type to a sensible file extension for the HubSpot upload filename.
+_DATA_IMAGE_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+}
 
 # A drafter writes the literal token NAME (uppercase) for the recipient's first name;
 # it becomes a HubSpot personalization token with a safe fallback. Rendered inside rich_text.
@@ -1227,8 +1245,11 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
       ('button', {'text','url'})  -> custom button module
 
     Standalone-line images and [[button: ...]] markers become their own native modules;
-    everything else accumulates and renders to HTML as rich-text blocks. Non-https images
-    are left inside the text (remote mode cannot host local files).
+    everything else accumulates and renders to HTML as rich-text blocks. Two image forms
+    are recognised on their own line: a hosted `https://` URL (used as-is) and an inline
+    base64 data URI `data:image/...;base64,...` (kept verbatim in `src` here — the actual
+    HubSpot upload happens in create_email_draft so this parser stays network-free).
+    Other non-https images are left inside the text (remote mode cannot host local files).
     """
     blocks: List[Tuple] = []
     text_buf: List[str] = []
@@ -1242,10 +1263,17 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
 
     for line in body_markdown.splitlines():
         mbtn = _BUTTON_RE.match(line)
+        mdata = _DATA_IMAGE_RE.match(line)
         mimg = _IMAGE_RE.match(line)
         if mbtn:
             flush_text()
             blocks.append(('button', {'text': mbtn.group('text'), 'url': mbtn.group('url')}))
+        elif mdata:
+            # Inline base64 image. Strip internal whitespace the renderer may have wrapped in;
+            # the data URI is decoded + uploaded later in create_email_draft.
+            flush_text()
+            uri = re.sub(r'\s+', '', mdata.group('uri'))
+            blocks.append(('image', {'src': uri, 'alt': mdata.group('alt') or 'Image'}))
         elif mimg:
             flush_text()
             blocks.append(('image', {'src': mimg.group('url'), 'alt': mimg.group('alt') or 'Image'}))
@@ -1255,6 +1283,63 @@ def parse_inline_markdown_to_blocks(body_markdown: str) -> List[Tuple]:
     if not blocks:
         blocks.append(('text', _apply_personalization(markdown.markdown(body_markdown))))
     return blocks
+
+
+_DATA_URI_RE = re.compile(r'^data:(?P<ct>image/[^;,\s]+);base64,(?P<b64>.+)$', re.DOTALL)
+
+
+def resolve_data_uri_images(blocks: List[Tuple]) -> List[Tuple]:
+    """
+    Upload any inline base64 data-URI image blocks to HubSpot and swap in the CDN URL.
+
+    Iterates the ordered blocks from parse_inline_markdown_to_blocks. For each image block
+    whose `src` is a `data:image/...;base64,...` URI, decode the base64, derive a filename
+    (content-type extension + a short content hash) and upload via upload_image_to_hubspot.
+    On success the block's `src` is replaced with the returned CDN URL; on failure (bad
+    base64, unsupported type, or a None upload result) the image block is DROPPED with a
+    warning so a `data:` URI never reaches HubSpot and the draft still succeeds.
+
+    https:// image blocks and all non-image blocks pass through unchanged. This is the only
+    network-touching step in the inline pipeline; the parser itself stays pure.
+    """
+    resolved: List[Tuple] = []
+    for block in blocks:
+        if block[0] != 'image':
+            resolved.append(block)
+            continue
+
+        data = block[1]
+        src = data.get('src', '')
+        if not src.startswith('data:'):
+            resolved.append(block)  # already-hosted https URL — pass through untouched
+            continue
+
+        m = _DATA_URI_RE.match(src)
+        if not m:
+            logger.warning("Dropping inline image: malformed data URI (not base64 image/*).")
+            continue
+        content_type = m.group('ct').lower()
+        try:
+            image_bytes = base64.b64decode(m.group('b64'), validate=True)
+        except Exception as e:
+            logger.warning(f"Dropping inline image: base64 decode failed ({e}).")
+            continue
+        if not image_bytes:
+            logger.warning("Dropping inline image: decoded to zero bytes.")
+            continue
+
+        ext = _DATA_IMAGE_EXT.get(content_type, 'png')
+        img_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+        filename = f"inline_{img_hash}.{ext}"
+
+        cdn_url = upload_image_to_hubspot(image_bytes, filename)
+        if not cdn_url:
+            logger.warning(f"Dropping inline image {filename}: HubSpot upload returned no URL.")
+            continue
+
+        logger.info(f"Inline image uploaded: {filename} ({len(image_bytes)} bytes) -> {cdn_url}")
+        resolved.append(('image', {'src': cdn_url, 'alt': data.get('alt', 'Image')}))
+    return resolved
 
 
 def build_native_email_content(email_name: str, subject_line: str, blocks: List[Tuple],
@@ -1375,9 +1460,13 @@ def create_email_draft(
     Args:
         subject: Email subject line.
         body_markdown: Email body as Markdown, rendered into NATIVE HubSpot modules:
-            text → rich_text; a standalone `![alt](https://…)` line → @hubspot/image_email;
+            text → rich_text; a standalone image line → @hubspot/image_email;
             a standalone `[[button: Label | https://url]]` line → the branded button module.
-            Images must be already-hosted https URLs (no local files in remote mode).
+            Images on their own line may be EITHER an already-hosted `![alt](https://…)` URL
+            (used as-is) OR an inline base64 data URI `![alt](data:image/png;base64,…)` — the
+            latter (e.g. a generated image or pasted screenshot) is uploaded to HubSpot
+            automatically and its CDN URL substituted. Local file paths are not supported in
+            remote mode; an inline image that fails to upload is dropped from the draft.
         brand: Optional brand key (e.g. 'edanz') mapped to a HubSpot Business Unit via
             config['brands']. Omit for the default / single-BU portal.
         email_name: Optional internal name shown in the HubSpot dashboard. Defaults to subject.
@@ -1397,6 +1486,10 @@ def create_email_draft(
 
     # Parse into ordered native-module blocks (text / image / button).
     blocks = parse_inline_markdown_to_blocks(body_markdown)
+    # Upload any inline base64 data-URI images to HubSpot and swap in their CDN URLs
+    # (https:// images pass through). Done AFTER parsing, BEFORE building content, so the
+    # parser stays network-free. Failed uploads are dropped, not emitted as data: URIs.
+    blocks = resolve_data_uri_images(blocks)
     counts: Dict[str, int] = {}
     for _kind, _ in blocks:
         counts[_kind] = counts.get(_kind, 0) + 1
