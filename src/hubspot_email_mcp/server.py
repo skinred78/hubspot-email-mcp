@@ -135,6 +135,18 @@ if _SERVER_URL:
 else:
     mcp = FastMCP("hubspot-email")
 
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health_check(request):
+    """Unauthenticated health check for Railway. custom_route bypasses OAuth.
+
+    The OAuth-enabled streamable-http app only serves /mcp + the OAuth endpoints,
+    so without this explicit route Railway's /health probe 404s and fails the deploy.
+    """
+    from starlette.responses import PlainTextResponse
+    return PlainTextResponse("ok")
+
+
 # Global configuration
 config = {}
 brand_guidelines = {}
