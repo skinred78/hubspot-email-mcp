@@ -122,6 +122,7 @@ class _SimpleOAuthProvider:
 _SERVER_URL = os.environ.get("SERVER_URL", "")
 if _SERVER_URL:
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+    from mcp.server.transport_security import TransportSecuritySettings
     _oauth_provider = _SimpleOAuthProvider()
     mcp = FastMCP(
         "hubspot-email",
@@ -131,6 +132,11 @@ if _SERVER_URL:
             resource_server_url=_SERVER_URL,
             client_registration_options=ClientRegistrationOptions(enabled=True),
         ),
+        # Configuring auth auto-enables DNS-rebinding protection with a localhost-only
+        # host allowlist, which 421s the Railway proxy's Host header. The real threat
+        # model (a browser rebinding DNS to a localhost server) doesn't apply to a public
+        # TLS server gated by OAuth, so disable it.
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 else:
     mcp = FastMCP("hubspot-email")
