@@ -1588,6 +1588,289 @@ def create_marketing_email(doc_path: str, email_name: str, subject_line: str) ->
     return result
 
 
+# ---------------------------------------------------------------------------
+# READ-ONLY review tools. These let Claude fetch and critique existing emails
+# (drafts + sent) across the WHOLE portal, including emails authored by other
+# people and in any Business Unit. They never create, update, or delete.
+#
+# Token efficiency is the governing constraint: the raw HubSpot email payload
+# embeds full content/widgets/styleSettings (tens of KB per email). list_emails
+# strips every email down to lightweight metadata; get_email extracts the body
+# into readable ordered content (text/images/buttons) rather than dumping the
+# raw module tree. Reference shapes verified live (2026-06-18):
+#   list/get → top-level state, type, createdById, publishedById/Name,
+#              primaryEmailCampaignId, businessUnitId, createdAt, updatedAt
+#   content  → content.flexAreas.main + content.widgets{} (a dict keyed by
+#              widget id; document order comes from each widget's `order` field)
+#   widgets  → rich_text  body.html
+#              image       body.img {src, alt}        (module_id 1367093 / @hubspot/image_email)
+#              button       body.text + body.link_to  (module_id 1976948)
+#              preview text body.value                (id "preview_text")
+#   stats    → GET /marketing/v3/emails/{id}?includeStats=true → top-level `stats`
+#              {counters{...}, ratios{...}, deviceBreakdown{...}}
+# ---------------------------------------------------------------------------
+
+_EMAILS_BASE = "https://api.hubapi.com/marketing/v3/emails"
+
+# Lightweight metadata fields kept by list_emails. Everything else (notably
+# content/widgets/styleSettings) is dropped so the model never sees the heavy tree.
+_LIGHT_EMAIL_FIELDS = (
+    "id", "name", "subject", "state", "type", "createdAt", "updatedAt",
+    "publishedAt", "createdById", "updatedById", "publishedById",
+    "publishedByName", "primaryEmailCampaignId", "businessUnitId",
+    "isPublished", "archived",
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t\f\v]+")
+
+
+def _html_to_text(html: str) -> str:
+    """Collapse rich_text HTML to legible plain text, preserving link URLs and structure.
+
+    Keeps anchor targets inline as `text (url)`, turns <br>/<p>/<li>/<h*> boundaries into
+    line breaks, strips the remaining tags, unescapes entities, and trims runaway whitespace.
+    This is for human review, not round-tripping, so it errs toward readability.
+    """
+    if not html:
+        return ""
+    import html as _htmllib
+
+    s = html
+    # Surface anchor URLs: <a href="X">label</a> -> label (X)
+    s = re.sub(
+        r'<a\b[^>]*?href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        lambda m: f"{_TAG_RE.sub('', m.group(2)).strip()} ({m.group(1)})",
+        s,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Block/line boundaries -> newlines.
+    s = re.sub(r"<\s*br\s*/?>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"</\s*(p|div|li|tr|h[1-6]|ul|ol|table)\s*>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"<\s*li\b[^>]*>", "- ", s, flags=re.IGNORECASE)
+    s = _TAG_RE.sub("", s)
+    s = _htmllib.unescape(s)
+    s = _WS_RE.sub(" ", s)
+    # Collapse 3+ blank lines, trim each line.
+    lines = [ln.strip() for ln in s.splitlines()]
+    out: List[str] = []
+    blank = 0
+    for ln in lines:
+        if ln:
+            out.append(ln)
+            blank = 0
+        else:
+            blank += 1
+            if blank <= 1:
+                out.append("")
+    return "\n".join(out).strip()
+
+
+def _strip_to_light(email: Dict) -> Dict:
+    """Project a raw email object down to the lightweight metadata fields only."""
+    light = {k: email.get(k) for k in _LIGHT_EMAIL_FIELDS if email.get(k) is not None}
+    # Author convenience: prefer a human name, fall back to the numeric id.
+    light["author"] = email.get("publishedByName") or email.get("createdById")
+    return light
+
+
+def _extract_readable_content(content: Dict) -> Dict:
+    """Pull the readable body out of an email `content` object in document order.
+
+    Walks content.widgets{} ordered by each widget's `order` field (the section/column
+    widget id lists are unreliable legacy refs, so we order by `order`). For each widget
+    we emit a compact block: rich_text -> {type:text, text}; image -> {type:image, src, alt};
+    button -> {type:button, text, url}; preview text is hoisted to `preheader`. The footer
+    and unrecognised modules are summarised, not dumped. Returns {preheader, blocks}.
+    """
+    widgets = (content or {}).get("widgets", {}) or {}
+    preheader = ""
+    items: List[Tuple] = []  # (order, block)
+    for wid, w in widgets.items():
+        body = w.get("body", {}) or {}
+        order = w.get("order")
+        if order is None:
+            order = body.get("order", 9999)
+        path = body.get("path") or ""
+        module_id = body.get("module_id") or w.get("module_id")
+
+        if wid == "preview_text" or "value" in body and path == "" and module_id is None:
+            preheader = (body.get("value") or "").strip() or preheader
+            continue
+        if path == "@hubspot/email_footer" or "footer" in str(wid).lower():
+            items.append((order, {"type": "footer", "note": "standard unsubscribe / CAN-SPAM footer"}))
+            continue
+        if "html" in body:
+            text = _html_to_text(body.get("html", ""))
+            if text:
+                items.append((order, {"type": "text", "text": text}))
+            continue
+        if "img" in body and isinstance(body["img"], dict):
+            img = body["img"]
+            items.append((order, {"type": "image", "src": img.get("src", ""), "alt": img.get("alt", "")}))
+            continue
+        if module_id == 1976948 or ("text" in body and "link_to" in body):
+            # Native button module. `link_to` is often the literal field token "url"; the
+            # actual destination lives in body['url'] when set. Surface whichever looks like a URL.
+            url = body.get("url") or body.get("destination") or ""
+            link_to = body.get("link_to")
+            if isinstance(link_to, str) and link_to.startswith("http"):
+                url = link_to
+            items.append((order, {"type": "button", "text": body.get("text", ""), "url": url}))
+            continue
+        # Unknown module: note it without dumping the raw tree.
+        items.append((order, {"type": "module", "note": path or (str(module_id) if module_id else "unknown")}))
+
+    items.sort(key=lambda t: (t[0] if isinstance(t[0], (int, float)) else 9999))
+    return {"preheader": preheader, "blocks": [b for _, b in items]}
+
+
+@mcp.tool()
+def list_emails(
+    limit: int = 20,
+    state: Optional[str] = None,
+    brand: Optional[str] = None,
+    search: Optional[str] = None,
+    after: Optional[str] = None,
+) -> Dict:
+    """
+    READ-ONLY. List existing HubSpot marketing emails as lightweight metadata.
+
+    Spans the WHOLE Edanz portal across ALL authors and ALL Business Units (brands), including
+    drafts and sent emails authored by other people. Returns only compact metadata per email
+    (id, name, subject, state, type, dates, author, campaign id, businessUnitId) — the heavy
+    content / widgets / styleSettings are stripped, so this is safe to call on large result sets.
+    Use get_email(id) to read one email's actual body.
+
+    Args:
+        limit: Max emails to return (default 20, capped at 100).
+        state: Optional case-insensitive state filter, e.g. DRAFT, PUBLISHED, AUTOMATED
+            (the HubSpot list API has no state query param, so this is applied client-side).
+        brand: Optional brand key (e.g. 'edanz') mapped to a Business Unit via config['brands'];
+            only emails in that Business Unit are returned.
+        search: Optional case-insensitive substring matched client-side against name and subject.
+        after: Optional pagination cursor from a previous call's `next_after`.
+
+    Returns:
+        Dict {total, count, emails: [lightweight metadata...], next_after}. `next_after` is the
+        cursor for the next page (None when exhausted). Note: client-side filters (state/brand/
+        search) are applied to each fetched page, so a filtered page may return fewer than `limit`
+        rows; follow `next_after` to continue.
+    """
+    limit = max(1, min(int(limit), 100))
+    bu_id = resolve_business_unit(brand) if brand else None
+    state_norm = state.strip().upper() if state else None
+    search_norm = search.strip().lower() if search else None
+
+    params: Dict[str, object] = {"limit": limit}
+    if after:
+        params["after"] = after
+
+    r = requests.get(_EMAILS_BASE, headers=get_hubspot_headers(), params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    rows: List[Dict] = []
+    for e in data.get("results", []):
+        if state_norm and (e.get("state") or "").upper() != state_norm:
+            continue
+        if bu_id and str(e.get("businessUnitId") or "") != str(bu_id):
+            continue
+        if search_norm:
+            hay = f"{e.get('name','')} {e.get('subject','')}".lower()
+            if search_norm not in hay:
+                continue
+        rows.append(_strip_to_light(e))
+
+    next_after = (data.get("paging", {}) or {}).get("next", {}).get("after")
+    return {
+        "total": data.get("total"),
+        "count": len(rows),
+        "emails": rows,
+        "next_after": next_after,
+    }
+
+
+@mcp.tool()
+def get_email(email_id: str) -> Dict:
+    """
+    READ-ONLY. Fetch ONE existing HubSpot marketing email and return it in readable form.
+
+    Works for any email in the portal regardless of author or Business Unit. Returns metadata
+    (name, subject, preheader, state, type, author, dates, businessUnitId, campaign id) plus the
+    body extracted into ordered, human-readable blocks — rich-text rendered to plain text (links
+    preserved as `label (url)`), images as {src, alt}, buttons as {text, url} — rather than the
+    raw widget JSON. For a DRAFT the latest in-progress buffer is read from the /draft endpoint;
+    for any other state the published/base content is used.
+
+    Args:
+        email_id: The HubSpot email id (from list_emails).
+
+    Returns:
+        Dict with metadata fields plus `content` = {preheader, blocks: [...]}.
+    """
+    headers = get_hubspot_headers()
+    base = requests.get(f"{_EMAILS_BASE}/{email_id}", headers=headers, timeout=30)
+    base.raise_for_status()
+    email = base.json()
+
+    content = email.get("content", {}) or {}
+    # For drafts, the live buffer lives at /draft; the base object returns published content.
+    if (email.get("state") or "").upper() == "DRAFT":
+        try:
+            d = requests.get(f"{_EMAILS_BASE}/{email_id}/draft", headers=headers, timeout=30)
+            if d.status_code == 200:
+                dc = d.json().get("content")
+                if dc:
+                    content = dc
+        except requests.exceptions.RequestException as exc:
+            logger.warning(f"get_email: draft fetch failed for {email_id}, using base content: {exc}")
+
+    extracted = _extract_readable_content(content)
+    result = _strip_to_light(email)
+    result["content"] = extracted
+    return result
+
+
+@mcp.tool()
+def get_email_stats(email_id: str) -> Dict:
+    """
+    READ-ONLY. Performance statistics for a SENT marketing email.
+
+    Spans the whole portal (any author / Business Unit). Reads HubSpot's own per-email stats via
+    GET /marketing/v3/emails/{id}?includeStats=true (the same numbers shown on the email's
+    Performance page). Returns the headline counters (sent, delivered, open, click, bounce,
+    unsubscribed, spamreport, etc.), the computed ratios (open rate, click-through rate, etc.),
+    and the device breakdown. For a DRAFT or never-sent email the counters will be zero / empty.
+
+    Args:
+        email_id: The HubSpot email id (from list_emails).
+
+    Returns:
+        Dict {id, name, subject, state, stats: {counters, ratios, deviceBreakdown}}.
+    """
+    r = requests.get(
+        f"{_EMAILS_BASE}/{email_id}",
+        headers=get_hubspot_headers(),
+        params={"includeStats": "true"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    email = r.json()
+    stats = email.get("stats", {}) or {}
+    return {
+        "id": email.get("id"),
+        "name": email.get("name"),
+        "subject": email.get("subject"),
+        "state": email.get("state"),
+        "stats": {
+            "counters": stats.get("counters", {}),
+            "ratios": stats.get("ratios", {}),
+            "deviceBreakdown": stats.get("deviceBreakdown", {}),
+        },
+    }
+
+
 def main():
     """Main entry point"""
     load_config()
