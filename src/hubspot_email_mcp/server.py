@@ -40,6 +40,12 @@ class _SimpleOAuthProvider:
         self._codes: dict = {}
         self._access_tokens: dict = {}
         self._refresh_tokens: dict = {}
+        # Optional pre-shared static bearer for non-interactive clients (e.g. run-queue
+        # sub-agents) that cannot complete a browser OAuth flow. When set, a request
+        # presenting `Authorization: Bearer <this>` authenticates directly — no /authorize,
+        # no /callback. The interactive Claude.ai OAuth path is unaffected. Read-only at the
+        # transport layer; tool-level behaviour is identical to an OAuth-authenticated client.
+        self._static_token = os.environ.get("HUBSPOT_EMAIL_MCP_STATIC_TOKEN", "").strip()
 
     async def get_client(self, client_id: str):
         return self._clients.get(client_id)
@@ -109,7 +115,20 @@ class _SimpleOAuthProvider:
         return OAuthToken(access_token=access, token_type="bearer", refresh_token=new_refresh)
 
     async def load_access_token(self, token: str):
-        return self._access_tokens.get(token)
+        existing = self._access_tokens.get(token)
+        if existing is not None:
+            return existing
+        # Headless / service-token path: a pre-shared static bearer that bypasses the
+        # interactive browser OAuth flow. Constant-time compare to avoid timing leaks.
+        if self._static_token and secrets.compare_digest(token, self._static_token):
+            from mcp.server.auth.provider import AccessToken
+            return AccessToken(
+                token=token,
+                client_id="headless-service",
+                scopes=[],
+                expires_at=None,
+            )
+        return None
 
     async def revoke_token(self, token) -> None:
         from mcp.server.auth.provider import AccessToken

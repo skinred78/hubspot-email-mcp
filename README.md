@@ -333,6 +333,17 @@ Claude Code will automatically use the correct server based on your request.
 - Restart Claude Desktop after modifying the config
 - Check Claude Desktop logs if the server doesn't appear: `~/Library/Logs/Claude/` (macOS) or `%APPDATA%\Claude\logs\` (Windows)
 
+## Remote deployment & headless auth
+
+When `SERVER_URL` is set (the remote/Railway deployment), the `/mcp` endpoint is gated by an in-memory OAuth 2.0 flow. Interactive clients (the Claude.ai connector) complete a browser authorization automatically.
+
+Non-interactive clients that cannot run a browser flow — e.g. a run-queue sub-agent — authenticate with a **pre-shared static bearer token** instead:
+
+- Set `HUBSPOT_EMAIL_MCP_STATIC_TOKEN` on the server (a long random secret, e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+- The client presents it as `Authorization: Bearer <token>` to `/mcp`. No `/authorize`, no `/callback`.
+- The interactive OAuth path is unaffected; both work side by side. Behaviour at the tool layer is identical to an OAuth-authenticated client.
+- Leave the env var unset to disable the static path entirely (OAuth-only).
+
 ## Usage
 
 Once installed, you can use the tool from Claude Code:
