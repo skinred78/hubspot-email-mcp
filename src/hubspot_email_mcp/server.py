@@ -1792,22 +1792,39 @@ def list_emails(
 
 
 @mcp.tool()
-def get_email(email_id: str) -> Dict:
+def get_email(email_id: str, raw: bool = False) -> Dict:
     """
-    READ-ONLY. Fetch ONE existing HubSpot marketing email and return it in readable form.
+    READ-ONLY. Fetch ONE existing HubSpot marketing email. Works for any email in the
+    portal regardless of author or Business Unit.
 
-    Works for any email in the portal regardless of author or Business Unit. Returns metadata
+    Default (raw=False) — use this for normal copy / content review. Returns metadata
     (name, subject, preheader, state, type, author, dates, businessUnitId, campaign id) plus the
     body extracted into ordered, human-readable blocks — rich-text rendered to plain text (links
     preserved as `label (url)`), images as {src, alt}, buttons as {text, url} — rather than the
-    raw widget JSON. For a DRAFT the latest in-progress buffer is read from the /draft endpoint;
-    for any other state the published/base content is used.
+    raw widget JSON. This is the compact, token-efficient view.
+
+    raw=True — opt-in structural source for CLONING, REVERSE-ENGINEERING, or AUDITING a
+    template's layout. Returns the metadata header plus the full raw structural payload:
+    `flexAreas` (the section/column/widget grid), `widgets` (raw widget definitions including
+    their HTML bodies), `styleSettings`, and `templatePath` (+ template mode when present).
+    This is the complete layout source you need to rebuild an email faithfully. It is MUCH
+    larger than the default (tens of KB), so only request it when you actually need the
+    structure, not for reading copy.
+
+    Either way, for a DRAFT the latest in-progress buffer is read from the /draft endpoint;
+    for any other state the published/base content is used, so raw reflects the same source
+    as the readable view.
 
     Args:
         email_id: The HubSpot email id (from list_emails).
+        raw: When True, return the full structural source (HTML, styleSettings, grid, template
+            path) for cloning / reverse-engineering / auditing a layout instead of the readable
+            blocks. Default False (compact readable view). Read-only either way.
 
     Returns:
-        Dict with metadata fields plus `content` = {preheader, blocks: [...]}.
+        raw=False: Dict with metadata fields plus `content` = {preheader, blocks: [...]}.
+        raw=True: Dict with metadata fields plus `content` = {flexAreas, widgets, styleSettings,
+            templatePath, templateMode?, emailTemplateMode?}.
     """
     headers = get_hubspot_headers()
     base = requests.get(f"{_EMAILS_BASE}/{email_id}", headers=headers, timeout=30)
@@ -1826,9 +1843,22 @@ def get_email(email_id: str) -> Dict:
         except requests.exceptions.RequestException as exc:
             logger.warning(f"get_email: draft fetch failed for {email_id}, using base content: {exc}")
 
-    extracted = _extract_readable_content(content)
     result = _strip_to_light(email)
-    result["content"] = extracted
+    if raw:
+        # Full structural view: the grid, raw widget defs (incl. HTML bodies), styles, and
+        # template path needed to clone / reverse-engineer the layout. Deliberately heavy.
+        structural: Dict = {
+            "flexAreas": content.get("flexAreas", {}) or {},
+            "widgets": content.get("widgets", {}) or {},
+            "styleSettings": content.get("styleSettings", {}) or {},
+            "templatePath": content.get("templatePath"),
+        }
+        for k in ("templateMode", "emailTemplateMode"):
+            if content.get(k) is not None:
+                structural[k] = content.get(k)
+        result["content"] = structural
+    else:
+        result["content"] = _extract_readable_content(content)
     return result
 
 
