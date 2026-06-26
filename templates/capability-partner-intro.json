@@ -1,52 +1,48 @@
 {
-  "template_id": "192423946168",
+  "template_id": "215880999597",
   "name": "capability-partner-intro",
-  "description": "AUTO-GENERATED draft from get_template_manifest, pending human curation of slot names and pairings.",
+  "description": "Edanz Japan editorial-partner introduction (Capability series). Fixed-arity: 3 credentials. Numerals 1/2/3 are fixed furniture. Mobile credential card normalised to mirror desktop (separate numeral + title/body widgets per credential).",
   "slots": {
     "intro": {
       "kind": "text",
       "desktop_id": "module-1-0-0",
       "mobile_id": "module-1-0-1"
     },
-    "cred_1_body": {
+    "cred_1": {
       "kind": "text",
-      "desktop_id": "module-2-1-1",
-      "mobile_id": "module-3-1-0"
+      "desktop_id": "module-cred-d-1",
+      "mobile_id": "module-cred-m-1"
     },
-    "cred_2_body": {
+    "cred_2": {
       "kind": "text",
-      "desktop_id": "module-2-1-3",
-      "mobile_id": "module-3-1-1"
+      "desktop_id": "module-cred-d-2",
+      "mobile_id": "module-cred-m-2"
     },
-    "cred_3_body": {
+    "cred_3": {
       "kind": "text",
-      "desktop_id": "module-2-1-5",
-      "mobile_id": "module-3-1-2"
+      "desktop_id": "module-cred-d-3",
+      "mobile_id": "module-cred-m-3"
     },
-    "find_more": {
+    "tagline": {
       "kind": "text",
-      "desktop_id": "module-9-0-3",
-      "mobile_id": "module-9-0-4"
+      "desktop_id": "module_17509286931892",
+      "mobile_id": "module_17509294401466"
     },
-    "partner_strip_caption": {
-      "kind": "text",
-      "desktop_id": "module-10-1-0",
-      "mobile_id": "module-11-1-0"
+    "cta_primary": {
+      "kind": "button",
+      "desktop_id": "module_17509287529653",
+      "mobile_id": "module_17509295141737"
     },
-    "next_partner": {
+    "next_up": {
       "kind": "text",
       "desktop_id": "module-13-1-0",
       "mobile_id": "module-14-1-0"
     },
     "partner_photo": {
       "kind": "image",
-      "desktop_id": "module-10-0-0",
-      "mobile_id": "module-11-0-0"
-    },
-    "cta_primary": {
-      "kind": "button",
-      "desktop_id": "module-10-1-1",
-      "mobile_id": "module-11-1-1"
+      "desktop_id": "module-2-0-0",
+      "mobile_id": "module-3-0-0"
     }
-  }
+  },
+  "_notes": "Each credential is a single rich_text widget holding a 2-cell table: left cell = marker (number now, icon-ready), right cell = title+body. The marker is layout, not content, so a credential slot's value is the FULL row html (marker + title + body). For clean fills, fill_email_draft should support a per-slot html wrapper (fixed marker cell + a {{content}} placeholder for the right cell), or the caller supplies the wrapped html. Numerals/markers are otherwise fixed furniture."
 }
