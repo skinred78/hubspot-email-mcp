@@ -10,18 +10,18 @@
     },
     "cred_1": {
       "kind": "text",
-      "desktop_id": "module-2-1-1",
-      "mobile_id": "module-mc-1-tb"
+      "desktop_id": "module-cred-d-1",
+      "mobile_id": "module-cred-m-1"
     },
     "cred_2": {
       "kind": "text",
-      "desktop_id": "module-2-1-3",
-      "mobile_id": "module-mc-2-tb"
+      "desktop_id": "module-cred-d-2",
+      "mobile_id": "module-cred-m-2"
     },
     "cred_3": {
       "kind": "text",
-      "desktop_id": "module-2-1-5",
-      "mobile_id": "module-mc-3-tb"
+      "desktop_id": "module-cred-d-3",
+      "mobile_id": "module-cred-m-3"
     },
     "tagline": {
       "kind": "text",
@@ -43,5 +43,6 @@
       "desktop_id": "module-2-0-0",
       "mobile_id": "module-3-0-0"
     }
-  }
+  },
+  "_notes": "Each credential is a single rich_text widget holding a 2-cell table: left cell = marker (number now, icon-ready), right cell = title+body. The marker is layout, not content, so a credential slot's value is the FULL row html (marker + title + body). For clean fills, fill_email_draft should support a per-slot html wrapper (fixed marker cell + a {{content}} placeholder for the right cell), or the caller supplies the wrapped html. Numerals/markers are otherwise fixed furniture."
 }
