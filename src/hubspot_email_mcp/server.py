@@ -1,5 +1,6 @@
 """HubSpot Email MCP Server - Create marketing emails from documents"""
 import base64
+import html as _html
 import json
 import os
 import hashlib
@@ -1936,6 +1937,26 @@ _EDITABLE_WIDGET_KINDS = {
     "@hubspot/image_email": "image",
 }
 
+
+def _infer_widget_kind(body: Dict) -> Optional[str]:
+    """Infer a fillable widget's slot kind from its body.
+
+    Primary signal is the widget `path` (@hubspot/rich_text|button_email|image_email).
+    Some templates (e.g. the Capability primary-CTA buttons) carry no `path`: their body
+    has the button shape (`text` + `destination`) directly. Treat that as a button too so
+    the manifest walker does not miss path-less CTAs.
+
+    Returns the slot kind ('text' | 'button' | 'image') or None if the widget is not fillable.
+    """
+    body = body or {}
+    kind = _EDITABLE_WIDGET_KINDS.get(body.get("path"))
+    if kind:
+        return kind
+    # Path-less button: a body that carries both the label and the link is a button.
+    if body.get("text") is not None and body.get("destination") is not None:
+        return "button"
+    return None
+
 # Manifests live in the repo, versioned with the server, one JSON file per template.
 # Resolution is layout-robust: an explicit env override wins; otherwise we probe the
 # repo-root `templates/` relative to the package (local/editable dev layout) and the
@@ -2017,7 +2038,7 @@ def get_template_manifest(email_id: str) -> Dict:
     editable: List[Dict] = []
     for wid, w in widgets.items():
         body = w.get("body", {}) or {}
-        kind = _EDITABLE_WIDGET_KINDS.get(body.get("path"))
+        kind = _infer_widget_kind(body)
         if not kind:
             continue
         editable.append({
@@ -2131,6 +2152,46 @@ def _render_text_slot(value: str) -> str:
     return "".join(parts)
 
 
+def _render_wrapped_value(value: str) -> str:
+    """Render a single user-supplied text value for substitution into a wrapper placeholder.
+
+    Wrapped slots (e.g. credential cards) hold plain title/body text inside a fixed HTML
+    scaffold that already carries its own markup, so we must NOT run the value through the
+    markdown -> <p> renderer (that would fight the wrapper's tags). Instead:
+      1. HTML-escape the value (<, >, &) so caller text cannot break the wrapper markup,
+      2. apply the NAME -> first-name personalization-token convenience (same as _render_text_slot).
+    The personalization token emitted by step 2 contains no <, >, & so escaping it first then
+    substituting is safe; a literal `{{ personalization_token(...) }}` the caller types survives
+    because escape() leaves `{`, `}`, `(`, `)` untouched.
+    """
+    escaped = _html.escape(value if isinstance(value, str) else str(value), quote=False)
+    return _apply_personalization(escaped)
+
+
+def _render_wrapped_slot(wrapper_html: str, value, content_kind: Optional[str]) -> str:
+    """Substitute a slot value into a per-breakpoint wrapper scaffold's {{field}} placeholders.
+
+    The wrapper is fixed furniture (the marker cell + layout) authored in the manifest; its
+    {{...}} placeholders are ours, never user input, so they are NOT escaped. Each user value
+    is escaped + personalization-tokenised via _render_wrapped_value before substitution.
+
+    Value shape follows content_kind:
+      - 'title_body' (or a dict value): {title, body} -> {{title}}, {{body}}. Missing keys
+        substitute empty. Any other dict keys map to their like-named {{key}} placeholders too.
+      - plain string: -> a single {{content}} placeholder (future simple wrapped slots).
+    """
+    out = wrapper_html
+    if isinstance(value, dict):
+        for key, raw in value.items():
+            out = out.replace("{{" + key + "}}", _render_wrapped_value(raw))
+        # Any title_body placeholder the caller omitted collapses to empty rather than leaking literal {{title}}.
+        for key in ("title", "body"):
+            out = out.replace("{{" + key + "}}", "")
+    else:
+        out = out.replace("{{content}}", _render_wrapped_value(value))
+    return out
+
+
 def _read_draft_content(email_id: str) -> Dict:
     """Read the live DRAFT content buffer for an email. Raises if the email is not a DRAFT.
 
@@ -2168,6 +2229,13 @@ def fill_email_draft(email_id: str, slot_values: Dict, template_name: str) -> Di
     Slot kinds and the slot_values shape they expect:
       - text:   a string. Rendered with the same markdown / NAME->first-name-token path as
                 create_email_draft, written to widget body.html.
+                If the manifest slot declares a `wrapper` (a per-breakpoint HTML scaffold with
+                {{field}} placeholders, e.g. a credential card's marker + cell layout), the value
+                is substituted INTO that wrapper instead of overwriting the widget. Value shape
+                follows the slot's content_kind: 'title_body' -> {"title": ..., "body": ...}
+                ({{title}}/{{body}}); a plain string -> a single {{content}} placeholder. Each
+                value is HTML-escaped (NAME-token convenience preserved); the wrapper's own
+                placeholders are not escaped, and the marker furniture survives untouched.
       - button: {"text": "...", "url": "..."}. Written to body.text + body.destination.
       - image:  {"src": "...", "alt": "..."}. A data:image/...;base64 src is uploaded to HubSpot
                 first (via the existing image path) and the CDN URL substituted; written to body.img.
@@ -2203,10 +2271,23 @@ def fill_email_draft(email_id: str, slot_values: Dict, template_name: str) -> Di
             slots_skipped.append(slot_name)
             continue
         kind = spec.get("kind")
+        wrapper = spec.get("wrapper") or {}
+        content_kind = spec.get("content_kind")
+        # A wrapped slot fills BOTH twins, each using its own breakpoint wrapper, so its
+        # body.html differs per twin. Map widget id -> the wrapper string to use for it.
+        wrapper_by_id: Dict[str, str] = {}
+        if wrapper:
+            d_wrap = wrapper.get("desktop")
+            m_wrap = wrapper.get("mobile")
+            if spec.get("desktop_id") and d_wrap is not None:
+                wrapper_by_id[spec["desktop_id"]] = d_wrap
+            if spec.get("mobile_id") and m_wrap is not None:
+                wrapper_by_id[spec["mobile_id"]] = m_wrap
         target_ids = [spec.get("desktop_id"), spec.get("mobile_id")]
 
         # Precompute the rendered payload once, then write to BOTH twins.
-        if kind == "text":
+        # Wrapped text slots are computed per-twin in the write loop (each twin's wrapper differs).
+        if kind == "text" and not wrapper:
             html = _render_text_slot(value if isinstance(value, str) else str(value))
         elif kind == "image":
             data = value if isinstance(value, dict) else {"src": value}
@@ -2227,7 +2308,12 @@ def fill_email_draft(email_id: str, slot_values: Dict, template_name: str) -> Di
                 continue
             body = widgets[wid].setdefault("body", {})
             if kind == "text":
-                body["html"] = html
+                if wid in wrapper_by_id:
+                    # Wrapped slot: substitute the value into THIS twin's breakpoint wrapper,
+                    # preserving the marker furniture. Do not overwrite the whole widget body.
+                    body["html"] = _render_wrapped_slot(wrapper_by_id[wid], value, content_kind)
+                else:
+                    body["html"] = html
             elif kind == "button":
                 data = value if isinstance(value, dict) else {}
                 if "text" in data:
