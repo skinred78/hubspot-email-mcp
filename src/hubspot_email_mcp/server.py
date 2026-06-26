@@ -1937,7 +1937,21 @@ _EDITABLE_WIDGET_KINDS = {
 }
 
 # Manifests live in the repo, versioned with the server, one JSON file per template.
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
+# Resolution is layout-robust: an explicit env override wins; otherwise we probe the
+# repo-root `templates/` relative to the package (local/editable dev layout) and the
+# current working directory (the Railway image runs from /app where the Dockerfile copies
+# templates/ to /app/templates). First existing candidate wins; the package-relative path
+# is the default when none exist yet.
+def _resolve_templates_dir() -> Path:
+    env = os.environ.get("HUBSPOT_EMAIL_MCP_TEMPLATES_DIR", "").strip()
+    if env:
+        return Path(env)
+    pkg_relative = Path(__file__).resolve().parent.parent.parent / "templates"
+    candidates = [pkg_relative, Path.cwd() / "templates"]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return pkg_relative
 
 
 def _widget_breakpoint_role(widget: Dict) -> str:
@@ -2169,7 +2183,7 @@ def fill_email_draft(email_id: str, slot_values: Dict, template_name: str) -> Di
     Returns:
         Dict {id, edit_url, slots_filled: [...], slots_skipped: [...]}.
     """
-    manifest_path = _TEMPLATES_DIR / f"{template_name}.json"
+    manifest_path = _resolve_templates_dir() / f"{template_name}.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"No manifest at {manifest_path}. Curate one with get_template_manifest first."
