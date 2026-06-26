@@ -1920,6 +1920,338 @@ def get_email_stats(email_id: str) -> Dict:
     }
 
 
+# --------------------------------------------------------------------------------------
+# Phase 2: clone-and-fill template tooling.
+#
+# A curated template email is cloned (POST .../clone, which preserves widget ids) and its
+# content-bearing widgets are filled from a slot manifest, leaving all brand furniture
+# intact. Writes hit the DRAFT buffer ONLY (PATCH .../{id}/draft); nothing is published or
+# sent. Architecture is settled and proven live (see PHASE2-CLONE-AND-FILL doc, Appendix A).
+# --------------------------------------------------------------------------------------
+
+# Widget body `path` -> slot kind. Only these three widget kinds are fillable.
+_EDITABLE_WIDGET_KINDS = {
+    "@hubspot/rich_text": "text",
+    "@hubspot/button_email": "button",
+    "@hubspot/image_email": "image",
+}
+
+# Manifests live in the repo, versioned with the server, one JSON file per template.
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
+
+
+def _widget_breakpoint_role(widget: Dict) -> str:
+    """Classify a widget's responsive role from styles.breakpointStyles.
+
+    `default` visible + `mobile` hidden  -> 'desktop' twin
+    `default` hidden  + `mobile` visible -> 'mobile' twin
+    neither hidden (or no breakpoint styles) -> 'shared'
+    """
+    bp = (widget.get("styles", {}) or {}).get("breakpointStyles", {}) or {}
+    default_hidden = bool((bp.get("default") or {}).get("hidden"))
+    mobile_hidden = bool((bp.get("mobile") or {}).get("hidden"))
+    if not default_hidden and mobile_hidden:
+        return "desktop"
+    if default_hidden and not mobile_hidden:
+        return "mobile"
+    return "shared"
+
+
+def _widget_preview(kind: str, body: Dict, limit: int = 60) -> str:
+    """A short, tag-stripped content preview for manifest curation."""
+    if kind == "text":
+        raw = body.get("html", "") or ""
+        text = _TAG_RE.sub("", raw)
+        import html as _htmllib
+        text = _htmllib.unescape(text)
+        text = _WS_RE.sub(" ", text).strip()
+    elif kind == "button":
+        text = (body.get("text") or "").strip()
+    elif kind == "image":
+        img = body.get("img") or {}
+        text = (img.get("alt") or "").strip()
+    else:
+        text = ""
+    return text[:limit]
+
+
+@mcp.tool()
+def get_template_manifest(email_id: str) -> Dict:
+    """
+    READ-ONLY curation aid. Inspect a template email and emit a DRAFT slot manifest a human
+    curates once per template (then saves to templates/<name>.json for clone_email + fill_email_draft).
+
+    Walks the email's raw widget tree and reports every fillable widget (rich_text / button_email /
+    image_email) with: id, kind (text/button/image), order, breakpoint role (desktop / mobile / shared,
+    read from styles.breakpointStyles.default.hidden vs mobile.hidden), and a ~60-char content preview.
+
+    Then SUGGESTS desktop/mobile slot pairings: widgets of the same kind whose previews match and whose
+    breakpoint roles are complementary (one desktop, one mobile) are almost certainly the same logical
+    slot. Each suggested slot carries {kind, desktop_id, mobile_id}. This is a heuristic curation aid,
+    NOT an authority: the human renames slots and confirms pairings before saving the manifest.
+
+    Args:
+        email_id: The HubSpot email id of the template (e.g. a curated TEMPLATE - ... email).
+
+    Returns:
+        Dict {template_id, name, editable_widgets: [{id, kind, order, breakpoint, preview}],
+              suggested_slots: {slot_N: {kind, desktop_id, mobile_id}}, unpaired: [ids]}.
+    """
+    email = get_email(email_id, raw=True)
+    widgets = (email.get("content", {}) or {}).get("widgets", {}) or {}
+
+    editable: List[Dict] = []
+    for wid, w in widgets.items():
+        body = w.get("body", {}) or {}
+        kind = _EDITABLE_WIDGET_KINDS.get(body.get("path"))
+        if not kind:
+            continue
+        editable.append({
+            "id": wid,
+            "kind": kind,
+            "order": w.get("order"),
+            "breakpoint": _widget_breakpoint_role(w),
+            "preview": _widget_preview(kind, body),
+        })
+    editable.sort(key=lambda d: (d["order"] if isinstance(d["order"], (int, float)) else 9999))
+
+    # Suggest pairings: same kind + matching preview + complementary breakpoint roles.
+    desktops = [e for e in editable if e["breakpoint"] == "desktop"]
+    mobiles = [e for e in editable if e["breakpoint"] == "mobile"]
+    used_mobile_ids: set = set()
+    suggested: Dict[str, Dict] = {}
+    paired_ids: set = set()
+    slot_n = 0
+    for d in desktops:
+        match = None
+        # Exact preview match first, then same-kind fallback by order proximity.
+        for m in mobiles:
+            if m["id"] in used_mobile_ids:
+                continue
+            if m["kind"] == d["kind"] and m["preview"] == d["preview"]:
+                match = m
+                break
+        if match is None:
+            for m in mobiles:
+                if m["id"] in used_mobile_ids:
+                    continue
+                if m["kind"] == d["kind"]:
+                    match = m
+                    break
+        if match is not None:
+            used_mobile_ids.add(match["id"])
+            slot_n += 1
+            suggested[f"slot_{slot_n}"] = {
+                "kind": d["kind"],
+                "desktop_id": d["id"],
+                "mobile_id": match["id"],
+                "preview": d["preview"],
+            }
+            paired_ids.add(d["id"])
+            paired_ids.add(match["id"])
+
+    unpaired = [e["id"] for e in editable if e["id"] not in paired_ids]
+    return {
+        "template_id": str(email_id),
+        "name": email.get("name"),
+        "editable_widgets": editable,
+        "suggested_slots": suggested,
+        "unpaired": unpaired,
+    }
+
+
+@mcp.tool()
+def clone_email(template_id: str, new_name: str, language: Optional[str] = None) -> Dict:
+    """
+    Clone a curated template email into a NEW DRAFT, preserving its layout and widget ids.
+
+    POSTs to .../emails/clone (EmailCloneRequestVNext). The clone is always a DRAFT in the same
+    Business Unit; nothing is published or sent. Because the clone preserves the template's widget
+    ids, a slot manifest built once for the template applies unchanged to every clone. Follow this
+    with fill_email_draft to populate the clone's content slots.
+
+    Args:
+        template_id: The HubSpot email id of the template to clone.
+        new_name: Internal name for the new draft (shown in the HubSpot dashboard).
+        language: Optional language code for the clone (passed through to HubSpot).
+
+    Returns:
+        Dict {id, edit_url}.
+    """
+    body: Dict = {"id": str(template_id), "cloneName": new_name}
+    if language:
+        body["language"] = language
+    try:
+        r = requests.post(f"{_EMAILS_BASE}/clone", headers=get_hubspot_headers(), json=body, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        audit_log({"event": "clone_email", "status": "error", "template_id": str(template_id),
+                   "new_name": new_name, "error": str(e)})
+        raise
+    new_id = str(r.json().get("id"))
+    edit_url = f"https://app.hubspot.com/email/{get_portal_id()}/edit/{new_id}"
+    audit_log({"event": "clone_email", "status": "ok", "template_id": str(template_id),
+               "new_id": new_id, "new_name": new_name, "language": language})
+    return {"id": new_id, "edit_url": edit_url}
+
+
+def _render_text_slot(value: str) -> str:
+    """Render a text-slot value to rich_text HTML using the SAME path create_email_draft uses.
+
+    Runs the value through parse_inline_markdown_to_blocks + resolve_data_uri_images (so NAME ->
+    first-name token, inline markdown -> HTML, and any inline data-URI image is hosted), then
+    concatenates the resulting text/image block HTML. No second renderer is introduced.
+    """
+    blocks = resolve_data_uri_images(parse_inline_markdown_to_blocks(value))
+    parts: List[str] = []
+    for kind, data in blocks:
+        if kind == "text":
+            parts.append(data)
+        elif kind == "image":
+            alt = (data.get("alt") or "Image").replace('"', "&quot;")
+            parts.append(f'<p><img src="{data["src"]}" alt="{alt}"></p>')
+        elif kind == "button":
+            # A button marker inside a text slot degrades to a plain link; buttons belong in
+            # button slots. Keep it visible rather than dropping content.
+            parts.append(f'<p><a href="{data["url"]}">{data["text"]}</a></p>')
+    return "".join(parts)
+
+
+def _read_draft_content(email_id: str) -> Dict:
+    """Read the live DRAFT content buffer for an email. Raises if the email is not a DRAFT.
+
+    Mirrors the /draft buffer read used by get_email, but enforces the hard rule that fill only
+    ever writes to a draft: a non-DRAFT email is refused before any write is attempted.
+    """
+    headers = get_hubspot_headers()
+    base = requests.get(f"{_EMAILS_BASE}/{email_id}", headers=headers, timeout=30)
+    base.raise_for_status()
+    email = base.json()
+    state = (email.get("state") or "").upper()
+    if state != "DRAFT":
+        raise ValueError(
+            f"fill_email_draft refuses to write to email {email_id}: state is {state!r}, not DRAFT. "
+            "Clone the template first (clone_email) and fill the resulting draft."
+        )
+    content = email.get("content", {}) or {}
+    d = requests.get(f"{_EMAILS_BASE}/{email_id}/draft", headers=headers, timeout=30)
+    if d.status_code == 200 and d.json().get("content"):
+        content = d.json()["content"]
+    return content
+
+
+@mcp.tool()
+def fill_email_draft(email_id: str, slot_values: Dict, template_name: str) -> Dict:
+    """
+    Fill a cloned template DRAFT's content slots from a manifest, leaving all brand furniture intact.
+
+    Loads templates/<template_name>.json (the curated slot manifest), reads the draft's live content
+    buffer, and for each slot present in slot_values writes the value to BOTH its desktop and mobile
+    widget twins, then PATCHes the full content back to the DRAFT buffer. HubSpot null-normalises
+    flexAreas (benign, idempotent); nothing else changes. Anything not named in the manifest is fixed
+    brand furniture and is never touched.
+
+    Slot kinds and the slot_values shape they expect:
+      - text:   a string. Rendered with the same markdown / NAME->first-name-token path as
+                create_email_draft, written to widget body.html.
+      - button: {"text": "...", "url": "..."}. Written to body.text + body.destination.
+      - image:  {"src": "...", "alt": "..."}. A data:image/...;base64 src is uploaded to HubSpot
+                first (via the existing image path) and the CDN URL substituted; written to body.img.
+
+    HARD RULES: writes the DRAFT buffer only; never publishes or sends; refuses any non-DRAFT email;
+    a slot with no manifest entry is reported in slots_skipped, never guessed.
+
+    Args:
+        email_id: The DRAFT email id to fill (typically a fresh clone_email result).
+        slot_values: Map of slot name -> value (see kinds above). Keys must match manifest slot names.
+        template_name: Manifest base name (templates/<template_name>.json) describing the template's slots.
+
+    Returns:
+        Dict {id, edit_url, slots_filled: [...], slots_skipped: [...]}.
+    """
+    manifest_path = _TEMPLATES_DIR / f"{template_name}.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"No manifest at {manifest_path}. Curate one with get_template_manifest first."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    slots = manifest.get("slots", {}) or {}
+
+    content = _read_draft_content(email_id)
+    widgets = content.get("widgets", {}) or {}
+
+    slots_filled: List[str] = []
+    slots_skipped: List[str] = []
+
+    for slot_name, value in slot_values.items():
+        spec = slots.get(slot_name)
+        if not spec:
+            slots_skipped.append(slot_name)
+            continue
+        kind = spec.get("kind")
+        target_ids = [spec.get("desktop_id"), spec.get("mobile_id")]
+
+        # Precompute the rendered payload once, then write to BOTH twins.
+        if kind == "text":
+            html = _render_text_slot(value if isinstance(value, str) else str(value))
+        elif kind == "image":
+            data = value if isinstance(value, dict) else {"src": value}
+            src = data.get("src", "")
+            alt = data.get("alt", "Image")
+            # Route data-URI images through the existing host-first path.
+            resolved = resolve_data_uri_images([("image", {"src": src, "alt": alt})])
+            if not resolved:
+                # Upload failed and the image block was dropped; skip rather than write a bad src.
+                slots_skipped.append(slot_name)
+                continue
+            _, rdata = resolved[0]
+            src, alt = rdata["src"], rdata.get("alt", alt)
+
+        wrote_any = False
+        for wid in target_ids:
+            if not wid or wid not in widgets:
+                continue
+            body = widgets[wid].setdefault("body", {})
+            if kind == "text":
+                body["html"] = html
+            elif kind == "button":
+                data = value if isinstance(value, dict) else {}
+                if "text" in data:
+                    body["text"] = data["text"]
+                if "url" in data:
+                    body["destination"] = data["url"]
+            elif kind == "image":
+                img = body.setdefault("img", {})
+                img["src"] = src
+                img["alt"] = alt
+            wrote_any = True
+        if wrote_any:
+            slots_filled.append(slot_name)
+        else:
+            slots_skipped.append(slot_name)
+
+    try:
+        patch = requests.patch(
+            f"{_EMAILS_BASE}/{email_id}/draft",
+            headers=get_hubspot_headers(),
+            json={"content": content},
+            timeout=30,
+        )
+        patch.raise_for_status()
+    except Exception as e:
+        audit_log({"event": "fill_email_draft", "status": "error", "email_id": str(email_id),
+                   "template_name": template_name, "slots_filled": slots_filled,
+                   "slots_skipped": slots_skipped, "error": str(e)})
+        raise
+
+    edit_url = f"https://app.hubspot.com/email/{get_portal_id()}/edit/{email_id}"
+    audit_log({"event": "fill_email_draft", "status": "ok", "email_id": str(email_id),
+               "template_name": template_name, "slots_filled": slots_filled,
+               "slots_skipped": slots_skipped})
+    return {"id": str(email_id), "edit_url": edit_url,
+            "slots_filled": slots_filled, "slots_skipped": slots_skipped}
+
+
 def main():
     """Main entry point"""
     load_config()
