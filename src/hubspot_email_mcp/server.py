@@ -33,7 +33,9 @@ class _SimpleOAuthProvider:
     The authorize step auto-approves — no login page — suitable for internal tools
     where Claude.ai workspace membership is the trust boundary.
 
-    State is in-memory only; tokens are lost on server restart (re-auth is automatic).
+    State lives in memory. Set HUBSPOT_EMAIL_MCP_STATE_PATH (to a file on a durable
+    Railway volume) to persist registrations + tokens across restarts; otherwise they
+    are lost on restart and every OAuth client must remove-and-re-add the connector.
     """
 
     def __init__(self) -> None:
@@ -47,12 +49,82 @@ class _SimpleOAuthProvider:
         # no /callback. The interactive Claude.ai OAuth path is unaffected. Read-only at the
         # transport layer; tool-level behaviour is identical to an OAuth-authenticated client.
         self._static_token = os.environ.get("HUBSPOT_EMAIL_MCP_STATIC_TOKEN", "").strip()
+        # Optional durable store for OAuth registrations + tokens. Without it, the dicts
+        # above live only in memory and every Railway restart/redeploy wipes them, forcing
+        # each Claude.ai / Desktop user to remove-and-re-add the connector. Point
+        # HUBSPOT_EMAIL_MCP_STATE_PATH at a file on a mounted Railway volume and the state
+        # survives restarts (users stay connected). Unset = in-memory only (unchanged
+        # local/stdio behaviour). Auth codes are intentionally NOT persisted: single-use,
+        # 5-minute TTL, harmless to lose.
+        self._state_path = os.environ.get("HUBSPOT_EMAIL_MCP_STATE_PATH", "").strip()
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Rehydrate clients + tokens from the state file, if configured and present."""
+        if not self._state_path:
+            return
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            logger.warning("OAuth state unreadable at %s (%s); starting empty", self._state_path, exc)
+            return
+        from mcp.shared.auth import OAuthClientInformationFull
+        from mcp.server.auth.provider import AccessToken, RefreshToken
+        try:
+            self._clients = {
+                cid: OAuthClientInformationFull(**c)
+                for cid, c in data.get("clients", {}).items()
+            }
+            self._access_tokens = {
+                tok: AccessToken(**a) for tok, a in data.get("access_tokens", {}).items()
+            }
+            self._refresh_tokens = {
+                tok: RefreshToken(**r) for tok, r in data.get("refresh_tokens", {}).items()
+            }
+        except Exception as exc:  # never let malformed state crash startup
+            logger.warning("OAuth state at %s failed to parse (%s); starting empty", self._state_path, exc)
+            self._clients, self._access_tokens, self._refresh_tokens = {}, {}, {}
+            return
+        logger.info(
+            "Loaded persisted OAuth state: %d client(s), %d access token(s), %d refresh token(s)",
+            len(self._clients), len(self._access_tokens), len(self._refresh_tokens),
+        )
+
+    def _save_state(self) -> None:
+        """Atomically write clients + tokens to the state file, if configured.
+
+        Called after every mutation. The write is small and infrequent (one per connector
+        auth / token refresh), so a synchronous write-through is fine for a single-replica
+        service. os.replace makes the swap atomic, so a crash mid-write cannot corrupt the
+        file. Assumes a single writer (one worker/replica).
+        """
+        if not self._state_path:
+            return
+        data = {
+            "clients": {cid: c.model_dump(mode="json") for cid, c in self._clients.items()},
+            "access_tokens": {tok: a.model_dump(mode="json") for tok, a in self._access_tokens.items()},
+            "refresh_tokens": {tok: r.model_dump(mode="json") for tok, r in self._refresh_tokens.items()},
+        }
+        try:
+            parent = os.path.dirname(self._state_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            tmp = f"{self._state_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self._state_path)
+        except OSError as exc:
+            logger.warning("Failed to persist OAuth state to %s: %s", self._state_path, exc)
 
     async def get_client(self, client_id: str):
         return self._clients.get(client_id)
 
     async def register_client(self, client_info) -> None:
         self._clients[client_info.client_id] = client_info
+        self._save_state()
 
     async def authorize(self, client, params) -> str:
         from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
@@ -90,6 +162,7 @@ class _SimpleOAuthProvider:
             client_id=client.client_id,
             scopes=authorization_code.scopes,
         )
+        self._save_state()
         return OAuthToken(
             access_token=access,
             token_type="bearer",
@@ -113,6 +186,7 @@ class _SimpleOAuthProvider:
         self._refresh_tokens[new_refresh] = RefreshToken(
             token=new_refresh, client_id=client.client_id, scopes=effective_scopes,
         )
+        self._save_state()
         return OAuthToken(access_token=access, token_type="bearer", refresh_token=new_refresh)
 
     async def load_access_token(self, token: str):
@@ -137,6 +211,7 @@ class _SimpleOAuthProvider:
             self._access_tokens.pop(token.token, None)
         else:
             self._refresh_tokens.pop(token.token, None)
+        self._save_state()
 
 
 # Initialize FastMCP — with OAuth if SERVER_URL is set (remote/Claude.ai), plain otherwise (stdio/local).
