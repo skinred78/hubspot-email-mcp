@@ -2427,6 +2427,425 @@ def fill_email_draft(email_id: str, slot_values: Dict, template_name: str) -> Di
             "slots_filled": slots_filled, "slots_skipped": slots_skipped}
 
 
+# --------------------------------------------------------------------------------------
+# Phase 4: layout composer — mint a designed, clone-and-fillable template FROM SCRATCH.
+#
+# compose_email_draft() takes a structured layout spec (sections -> columns -> widgets) and
+# emits it via the SAME create->PATCH mechanics build_native_email_content uses, reusing
+# every relevant existing helper (get_hubspot_headers, resolve_business_unit,
+# resolve_data_uri_images, _render_wrapped_slot, get_portal_id) rather than re-implementing
+# markdown / image / button / footer / wrapper-substitution logic. It also WRITES the
+# templates/<slug>.json slot manifest itself — the composer is the only code that knows
+# every widget id and twin pairing at emit time — so the minted template is immediately
+# clone_email + fill_email_draft-ready, exactly like a human-curated template.
+# See PHASE4-LAYOUT-COMPOSER-SPEC.md for the full design + de-risk findings this builds on.
+#
+# Twinning model:
+#   - "shared" widget: ONE physical widget, no styles.breakpointStyles. Used when content is
+#     identical on desktop/mobile (plain text, images, buttons, footer). Its manifest slot
+#     sets desktop_id == mobile_id (same id) so fill_email_draft's dual-write is a harmless,
+#     idempotent double-write to the same widget.
+#   - "twinned" widget PAIR: TWO physical widgets (a `-d` and `-m` id), each carrying
+#     styles.breakpointStyles toggling `hidden` for the opposite breakpoint (the proven live
+#     pattern). Used for any `wrapper`-bearing widget (its wrapper HTML legitimately differs
+#     per breakpoint, e.g. smaller mobile font sizes) and for every widget inside a
+#     multi-column row (columns cannot render side-by-side on a narrow mobile screen).
+#   - multi-column SECTION duplication: a whole extra section (not just a widget pair) is
+#     emitted for any column-count > 1 row: a desktop section (stack:"NONE", N columns) plus
+#     a mobile-twin section (single width-12 column, the row's widgets' mobile twins stacked
+#     top-to-bottom in the same left-to-right reading order). This is the de-risk doc's
+#     default pattern for the "does a 3-col row need an explicit mobile twin" unknown.
+# --------------------------------------------------------------------------------------
+
+_LAYOUT_BUTTON_MODULE_ID = 1976948
+
+
+def _slugify(text: str) -> str:
+    """Filesystem/manifest-safe slug: lowercase, alnum + hyphens, collapsed. Never empty."""
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s or "template"
+
+
+def _layout_style_settings(theme: Dict) -> Dict:
+    """Map a layout spec's `theme` block to styleSettings.
+
+    Only `page_bg` -> backgroundColor and `body_bg` -> bodyColor are emitted: these are the
+    TWO keys the de-risk test proved HubSpot accepts as a partial styleSettings payload (it
+    fills in the rest with defaults). Other theme fields (button_color, primary_color,
+    h1_size, h2_size) are NOT proven styleSettings keys, so they are deliberately not
+    invented here — button_color instead seeds the default button widget colour, and
+    primary_color/h1_size/h2_size are documentation for whoever authors a layout spec's own
+    widget `html` (which already carries literal inline styles), not consumed programmatically.
+    """
+    style: Dict = {}
+    if theme.get("page_bg"):
+        style["backgroundColor"] = theme["page_bg"]
+    if theme.get("body_bg"):
+        style["bodyColor"] = theme["body_bg"]
+    return style
+
+
+def _layout_section_style(section: Dict) -> Dict:
+    """Build a Section's `style` block: padding + optional bg/radius.
+
+    IMPORTANT (found empirically while running the Phase 4 test-gate — the PHASE4 doc's
+    de-risk finding undersold this): HubSpot's top-level `style` object has NO border-radius
+    fields at all (unrecognized keys there are silently dropped, no error). Border radius
+    ONLY round-trips when placed inside `style.breakpointStyles.{default,mobile}` — the SAME
+    place backgroundColor is (also) echoed. So both bg and radius are written into
+    breakpointStyles as the functioning copy; backgroundColor is additionally mirrored at the
+    top level (confirmed to survive there too, unlike radius) for the editor's convenience.
+    """
+    top, bottom = (section.get("padding") or [20, 20])
+    style: Dict = {"paddingTop": f"{top}px", "paddingBottom": f"{bottom}px"}
+    bg = section.get("bg")
+    radius = section.get("radius")
+    bp_override: Dict = {}
+    if bg:
+        style["backgroundColor"] = bg
+        bp_override["backgroundColor"] = bg
+    if radius:
+        r = f"{radius}px"
+        bp_override.update({
+            "borderTopLeftRadius": r, "borderTopRightRadius": r,
+            "borderBottomLeftRadius": r, "borderBottomRightRadius": r,
+        })
+    if bp_override:
+        style["breakpointStyles"] = {"default": dict(bp_override), "mobile": dict(bp_override)}
+    return style
+
+
+def _layout_twin_styles(role: str) -> Dict:
+    """widget['styles'] for a given breakpoint role: 'desktop' -> visible only on desktop,
+    'mobile' -> visible only on mobile, anything else (e.g. 'shared') -> no toggle at all."""
+    if role == "desktop":
+        return {"breakpointStyles": {"default": {"hidden": False}, "mobile": {"hidden": True}}}
+    if role == "mobile":
+        return {"breakpointStyles": {"default": {"hidden": True}, "mobile": {"hidden": False}}}
+    return {}
+
+
+@mcp.tool()
+def compose_email_draft(layout: Dict, brand: Optional[str] = None, email_name: Optional[str] = None) -> Dict:
+    """
+    Mint a POLISHED, custom-designed marketing-email DRAFT from a structured layout spec —
+    multi-column rows, coloured/rounded section panels, styled cards, the native pill button,
+    themed styleSettings, and desktop/mobile twins — programmatically, via the SAME
+    create->PATCH mechanics build_native_email_content uses (reusing its helpers:
+    get_hubspot_headers, resolve_business_unit, resolve_data_uri_images, _render_wrapped_slot,
+    get_portal_id — no markdown/image/button/footer/wrapper logic is re-implemented). The
+    output is a first-class clone-and-fillable template: get_template_manifest detects its
+    slots, and clone_email + fill_email_draft work on it exactly like a human-curated
+    template. This FEEDS the existing clone-and-fill runtime; it does not replace it —
+    create_email_draft, clone_email, fill_email_draft, and get_template_manifest are all
+    unchanged (additive sibling tool).
+
+    Args:
+        layout: The layout spec (see PHASE4-LAYOUT-COMPOSER-SPEC.md):
+            {"name": str, "subject": str,
+             "theme": {"page_bg", "body_bg", "button_color", "primary_color", "h1_size",
+                       "h2_size"} (all optional; only page_bg/body_bg feed styleSettings —
+                       see _layout_style_settings),
+             "sections": [Section, ...]}.
+            Section = {"id": str, "bg": "#RRGGBB"?, "radius": int?, "padding": [top,bottom]?,
+                       "fixed": bool?, "columns": [Column, ...]}.
+              `fixed: true` marks the WHOLE section as brand furniture: any `slot` named on
+              its widgets is ignored (never written to the manifest).
+              len(columns) == 1  -> single-column section. A widget with no `wrapper` is
+                  emitted as ONE shared widget (identical on desktop/mobile). A widget WITH
+                  a `wrapper` is still twinned (see below) even inside a single-column
+                  section, because its wrapper legitimately differs per breakpoint.
+              len(columns) > 1   -> multi-column ROW. Emits a desktop section
+                  (style.stack="NONE", the row's columns side by side) PLUS an auto mobile-twin
+                  section (one width-12 column, every widget's mobile twin stacked in the same
+                  left-to-right reading order). Every widget in a multi-column row is twinned.
+            Column = {"width": int (1..12, default 12/n), "widgets": [Widget, ...]}.
+            Widget (one of):
+              {"type": "richtext", "slot": str?, "html": str?,
+               "wrapper": {"desktop": str, "mobile": str}?, "content_kind": "title_body"?,
+               "content": dict|str?}
+                - No `wrapper`: `html` is the literal rich_text body (author-supplied HTML).
+                - With `wrapper`: `content` (required) is the INITIAL value substituted into
+                  the wrapper via the SAME _render_wrapped_slot() fill_email_draft uses at
+                  fill time — 'title_body' -> {"title":..., "body":...} -> {{title}}/{{body}}
+                  placeholders; a plain string -> a single {{content}} placeholder. `html` is
+                  ignored when `wrapper` is set. The wrapper (with its placeholders intact)
+                  is what gets written into the manifest slot, so a later fill_email_draft
+                  call substitutes fresh content into the identical scaffold.
+              {"type": "button", "slot": str?, "text": str, "url": str, "color": "#RRGGBB"?,
+               "radius": int? (default 40)}
+              {"type": "image", "slot": str?, "src": str?, "alt": str?}
+                A `data:image/...;base64,...` src is uploaded to HubSpot first (via
+                resolve_data_uri_images, the same path create_email_draft uses); an
+                already-hosted `https://` src passes through unchanged.
+              {"type": "footer"}
+                Emits the branded @hubspot/email_footer from the brand config
+                (footer_html/footer_bg), same shape build_native_email_content uses. Never a
+                slot, regardless of `slot`/`fixed`.
+            A widget with a `slot` name, inside a non-`fixed` section, is fillable and is
+            recorded in the emitted manifest; everything else is brand furniture and is
+            never written as a slot.
+        brand: Optional brand key (e.g. 'edanz') resolved to a Business Unit + defaults
+            (button_color, footer_html, footer_bg) via config['brands'], same as
+            create_email_draft. Omit for the default / single-BU portal.
+        email_name: Optional internal HubSpot name. Defaults to layout['name'] or the subject.
+
+    Returns:
+        Dict {email_id, email_url, status ('draft'), manifest_path, slots}. `slots` is the
+        same slot map written to templates/<slug>.json: {slot_name: {kind, desktop_id,
+        mobile_id, [wrapper, content_kind]}}.
+    """
+    brand_cfg = (config.get("brands", {}).get(brand) or {}) if brand else {}
+    business_unit_id = resolve_business_unit(brand)
+    office_location_id = brand_cfg.get("office_location_id")
+    default_button_color = brand_cfg.get("button_color")
+    default_footer_html = brand_cfg.get("footer_html")
+    default_footer_bg = brand_cfg.get("footer_bg")
+
+    theme = layout.get("theme", {}) or {}
+    theme_button_color = theme.get("button_color") or default_button_color or "#0B5394"
+
+    name = email_name or layout.get("name") or layout.get("subject") or "Untitled Template"
+    subject = layout.get("subject") or name
+
+    headers = get_hubspot_headers()
+    payload = {"name": name, "subject": subject, "emailType": "BATCH_EMAIL"}
+    if business_unit_id:
+        payload["businessUnitId"] = business_unit_id
+    if office_location_id:
+        payload["subscriptionDetails"] = {"officeLocationId": office_location_id}
+
+    email_id = None
+    try:
+        r = requests.post("https://api.hubapi.com/marketing/v3/emails", headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        created = r.json()
+        email_id = created.get("id")
+        portal_id = created.get("portalId") or get_portal_id()
+
+        widgets: Dict[str, Dict] = {}
+        sections: List[Dict] = []
+        slots: Dict[str, Dict] = {}
+        order_state = {"n": 0}
+
+        def next_order() -> int:
+            order_state["n"] += 1
+            return order_state["n"]
+
+        def stable_id(section_id: str, slot: Optional[str], col_idx: int, w_idx: int) -> str:
+            return f"w-{slot}" if slot else f"w-{section_id}-{col_idx}-{w_idx}"
+
+        def widget_base(wid: str, role: str) -> Dict:
+            return {"id": wid, "name": wid, "type": "module", "order": next_order(),
+                     "css": {}, "child_css": {}, "styles": _layout_twin_styles(role)}
+
+        def emit_richtext(wid: str, html: str, role: str) -> None:
+            w = widget_base(wid, role)
+            w["body"] = {"path": "@hubspot/rich_text", "css_class": "dnd-module",
+                         "html": html, "schema_version": 2}
+            widgets[wid] = w
+
+        def emit_image(wid: str, wspec: Dict, role: str) -> None:
+            src = wspec.get("src") or ""
+            alt = wspec.get("alt") or "Image"
+            if src.startswith("data:"):
+                resolved = resolve_data_uri_images([("image", {"src": src, "alt": alt})])
+                src = resolved[0][1]["src"] if resolved else ""
+            w = widget_base(wid, role)
+            w["body"] = {"path": "@hubspot/image_email", "img": {"src": src, "alt": alt},
+                         "schema_version": 2}
+            widgets[wid] = w
+
+        def emit_button(wid: str, wspec: Dict, role: str) -> None:
+            color = wspec.get("color") or theme_button_color
+            radius = wspec.get("radius", 40)
+            w = widget_base(wid, role)
+            w["module_id"] = _LAYOUT_BUTTON_MODULE_ID
+            w["body"] = {"module_id": _LAYOUT_BUTTON_MODULE_ID, "text": wspec.get("text", ""),
+                         "destination": wspec.get("url", "#"), "font_color": "#ffffff",
+                         "corner_radius": radius, "inner_horizontal_padding": 42,
+                         "inner_vertical_padding": 15,
+                         "style": {"background_color": {"color": color, "opacity": 100}},
+                         "schema_version": 2}
+            widgets[wid] = w
+
+        def emit_footer(wid: str) -> None:
+            w = widget_base(wid, "shared")
+            if default_footer_html:
+                w["body"] = {"path": "@hubspot/email_footer", "display": "custom",
+                             "footer_html": default_footer_html, "align": "center",
+                             "unsubscribe_link_type": "both",
+                             "font": {"color": "#ffffff", "font": "Arial, sans-serif",
+                                      "size": {"units": "px", "value": 12}},
+                             "schema_version": 2}
+            else:
+                w["body"] = {"path": "@hubspot/email_footer", "align": "center",
+                             "unsubscribe_link_type": "both", "schema_version": 2}
+            widgets[wid] = w
+
+        def emit_shared(section_id: str, col_idx: int, w_idx: int, wspec: Dict, section_fixed: bool) -> str:
+            """Emit ONE physical widget shared across breakpoints. Returns its id."""
+            wtype = wspec.get("type")
+            slot = None if section_fixed else wspec.get("slot")
+            wid = stable_id(section_id, slot, col_idx, w_idx)
+            if wtype == "richtext":
+                emit_richtext(wid, wspec.get("html", ""), "shared")
+                kind = "text"
+            elif wtype == "image":
+                emit_image(wid, wspec, "shared")
+                kind = "image"
+            elif wtype == "button":
+                emit_button(wid, wspec, "shared")
+                kind = "button"
+            elif wtype == "footer":
+                emit_footer(wid)
+                return wid
+            else:
+                raise ValueError(f"compose_email_draft: unknown widget type {wtype!r}")
+            if slot:
+                slots[slot] = {"kind": kind, "desktop_id": wid, "mobile_id": wid}
+            return wid
+
+        def emit_twinned(section_id: str, col_idx: int, w_idx: int, wspec: Dict,
+                          section_fixed: bool) -> Tuple[str, str]:
+            """Emit a DESKTOP + MOBILE widget pair. Returns (desktop_id, mobile_id)."""
+            wtype = wspec.get("type")
+            slot = None if section_fixed else wspec.get("slot")
+            base = stable_id(section_id, slot, col_idx, w_idx)
+            d_id, m_id = f"{base}-d", f"{base}-m"
+            wrapper = wspec.get("wrapper") or {}
+            content_kind = wspec.get("content_kind")
+
+            if wtype == "richtext":
+                if wrapper:
+                    content = wspec.get("content", "")
+                    d_html = _render_wrapped_slot(wrapper.get("desktop", ""), content, content_kind)
+                    m_html = _render_wrapped_slot(wrapper.get("mobile", ""), content, content_kind)
+                else:
+                    d_html = m_html = wspec.get("html", "")
+                emit_richtext(d_id, d_html, "desktop")
+                emit_richtext(m_id, m_html, "mobile")
+                kind = "text"
+            elif wtype == "image":
+                emit_image(d_id, wspec, "desktop")
+                emit_image(m_id, wspec, "mobile")
+                kind = "image"
+            elif wtype == "button":
+                emit_button(d_id, wspec, "desktop")
+                emit_button(m_id, wspec, "mobile")
+                kind = "button"
+            elif wtype == "footer":
+                # Footers are never twinned/multi-col in practice; degrade to a single shared
+                # widget referenced from both slots rather than fail on unanticipated layouts.
+                emit_footer(d_id)
+                return d_id, d_id
+            else:
+                raise ValueError(f"compose_email_draft: unknown widget type {wtype!r}")
+
+            if slot:
+                entry = {"kind": kind, "desktop_id": d_id, "mobile_id": m_id}
+                if wtype == "richtext" and wrapper:
+                    entry["wrapper"] = wrapper
+                    if content_kind:
+                        entry["content_kind"] = content_kind
+                slots[slot] = entry
+            return d_id, m_id
+
+        for s_idx, section in enumerate(layout.get("sections", []) or []):
+            section_id = section.get("id") or f"section-{s_idx}"
+            columns = section.get("columns") or []
+            fixed = bool(section.get("fixed"))
+            style = _layout_section_style(section)
+
+            if len(columns) <= 1:
+                col = columns[0] if columns else {"widgets": []}
+                col_widget_ids: List[str] = []
+                for w_idx, wspec in enumerate(col.get("widgets", []) or []):
+                    if wspec.get("wrapper") and not fixed:
+                        d_id, m_id = emit_twinned(section_id, 0, w_idx, wspec, fixed)
+                        col_widget_ids.extend([d_id, m_id])
+                    else:
+                        wid = emit_shared(section_id, 0, w_idx, wspec, fixed)
+                        col_widget_ids.append(wid)
+                sections.append({
+                    "id": section_id,
+                    "columns": [{"id": f"{section_id}-col-0", "width": 12, "widgets": col_widget_ids}],
+                    "style": style,
+                })
+            else:
+                n = len(columns)
+                default_width = max(1, 12 // n)
+                desktop_cols: List[Dict] = []
+                mobile_widget_ids: List[str] = []
+                for c_idx, col in enumerate(columns):
+                    d_ids_this_col: List[str] = []
+                    for w_idx, wspec in enumerate(col.get("widgets", []) or []):
+                        d_id, m_id = emit_twinned(section_id, c_idx, w_idx, wspec, fixed)
+                        d_ids_this_col.append(d_id)
+                        mobile_widget_ids.append(m_id)
+                    desktop_cols.append({"id": f"{section_id}-col-{c_idx}",
+                                         "width": col.get("width", default_width),
+                                         "widgets": d_ids_this_col})
+                desktop_style = dict(style)
+                desktop_style["stack"] = "NONE"
+                sections.append({"id": f"{section_id}-d", "columns": desktop_cols, "style": desktop_style})
+                sections.append({
+                    "id": f"{section_id}-m",
+                    "columns": [{"id": f"{section_id}-m-col-0", "width": 12, "widgets": mobile_widget_ids}],
+                    "style": style,
+                })
+
+        style_settings = _layout_style_settings(theme)
+        patch_body = {"content": {"templatePath": "@hubspot/email/dnd/Start_from_scratch.html",
+                                   "styleSettings": style_settings,
+                                   "flexAreas": {"main": {"sections": sections}},
+                                   "widgets": widgets}}
+        patch = requests.patch(f"https://api.hubapi.com/marketing/v3/emails/{email_id}/draft",
+                               headers=headers, json=patch_body, timeout=30)
+        if patch.status_code != 200:
+            logger.error(f"compose_email_draft PATCH failed: {patch.text[:500]}")
+        patch.raise_for_status()
+
+        slug = _slugify(name)
+        templates_dir = _resolve_templates_dir()
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = templates_dir / f"{slug}.json"
+        manifest = {"template_id": str(email_id), "name": name, "slots": slots}
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        # Belt-and-suspenders cross-check (spec step 6): ask the independent detector to
+        # confirm every widget id the composer just wrote actually exists and is fillable.
+        # Read-only, never raises — a mismatch is logged, not fatal, since the composer's
+        # own bookkeeping is authoritative for the manifest it just wrote.
+        try:
+            detected = get_template_manifest(str(email_id))
+            detected_ids = {e["id"] for e in detected.get("editable_widgets", [])}
+            known_ids = {wid for slot in slots.values() for wid in (slot["desktop_id"], slot["mobile_id"])}
+            missing = known_ids - detected_ids
+            if missing:
+                logger.warning(f"compose_email_draft: {len(missing)} composed widget id(s) "
+                               f"not detected by get_template_manifest: {sorted(missing)}")
+        except Exception as exc:
+            logger.warning(f"compose_email_draft: manifest cross-check skipped ({exc})")
+
+    except Exception as e:
+        audit_log({"event": "compose_email_draft", "status": "error", "brand": brand,
+                   "email_id": str(email_id) if email_id else None, "email_name": name, "error": str(e)})
+        raise
+
+    result = {
+        "email_id": str(email_id),
+        "email_url": f"https://app.hubspot.com/email/{portal_id}/edit/{email_id}",
+        "status": "draft",
+        "manifest_path": str(manifest_path),
+        "slots": slots,
+    }
+    audit_log({"event": "compose_email_draft", "status": "ok", "brand": brand,
+               "email_id": str(email_id), "email_name": name, "slots": list(slots.keys())})
+    logger.info(f"Composed draft: {result['email_url']} ({len(slots)} slot(s))")
+    return result
+
+
 def main():
     """Main entry point"""
     load_config()
