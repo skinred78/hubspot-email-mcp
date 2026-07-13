@@ -1,0 +1,76 @@
+{
+  "template_id": "217060933681",
+  "name": "TEMPLATE - Newsletter",
+  "slots": {
+    "masthead": {
+      "kind": "text",
+      "desktop_id": "w-masthead",
+      "mobile_id": "w-masthead"
+    },
+    "editors_note": {
+      "kind": "text",
+      "desktop_id": "w-editors_note",
+      "mobile_id": "w-editors_note"
+    },
+    "feature_image": {
+      "kind": "image",
+      "desktop_id": "w-feature_image-d",
+      "mobile_id": "w-feature_image-m"
+    },
+    "feature_card": {
+      "kind": "text",
+      "desktop_id": "w-feature_card-d",
+      "mobile_id": "w-feature_card-m",
+      "wrapper": {
+        "desktop": "<div style=\"font-family:Arial,sans-serif;font-size:11px;font-weight:700;letter-spacing:1.5px;color:#BA2532;\">特集 ｜ 査読対応</div><div style=\"font-size:17px;font-weight:700;color:#023762;line-height:1.55;margin-top:8px;\">{{title}}</div><div style=\"font-size:13px;color:#5b6b7a;line-height:1.8;margin-top:8px;\">{{body}}</div>",
+        "mobile": "<div style=\"font-family:Arial,sans-serif;font-size:10px;font-weight:700;letter-spacing:1.5px;color:#BA2532;\">特集 ｜ 査読対応</div><div style=\"font-size:15px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:12px;color:#5b6b7a;line-height:1.75;margin-top:8px;\">{{body}}</div>"
+      },
+      "content_kind": "title_body"
+    },
+    "topic_1": {
+      "kind": "text",
+      "desktop_id": "w-topic_1-d",
+      "mobile_id": "w-topic_1-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:18px 16px;\"><div style=\"font-family:Arial,sans-serif;font-size:10px;font-weight:700;letter-spacing:1px;color:#BA2532;\">{{title}}</div><div style=\"font-size:14px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:14px 14px;\"><div style=\"font-family:Arial,sans-serif;font-size:9px;font-weight:700;letter-spacing:1px;color:#BA2532;\">{{title}}</div><div style=\"font-size:13px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "topic_2": {
+      "kind": "text",
+      "desktop_id": "w-topic_2-d",
+      "mobile_id": "w-topic_2-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:18px 16px;\"><div style=\"font-family:Arial,sans-serif;font-size:10px;font-weight:700;letter-spacing:1px;color:#BA2532;\">{{title}}</div><div style=\"font-size:14px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:14px 14px;\"><div style=\"font-family:Arial,sans-serif;font-size:9px;font-weight:700;letter-spacing:1px;color:#BA2532;\">{{title}}</div><div style=\"font-size:13px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "topic_3": {
+      "kind": "text",
+      "desktop_id": "w-topic_3-d",
+      "mobile_id": "w-topic_3-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:18px 16px;\"><div style=\"font-family:Arial,sans-serif;font-size:10px;font-weight:700;letter-spacing:1px;color:#BA2532;\">{{title}}</div><div style=\"font-size:14px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:14px 14px;\"><div style=\"font-family:Arial,sans-serif;font-size:9px;font-weight:700;letter-spacing:1px;color:#BA2532;\">{{title}}</div><div style=\"font-size:13px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "signoff_text": {
+      "kind": "text",
+      "desktop_id": "w-signoff_text-d",
+      "mobile_id": "w-signoff_text-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-left:3px solid #BA2532;\"><tr><td style=\"padding:2px 0 0 20px;\"><p style=\"margin:0 0 10px 0;font-size:14px;line-height:1.9;color:#272424;\">{{body}}</p><p style=\"margin:0;font-size:13px;color:#5b6b7a;\">{title}</p></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-left:3px solid #BA2532;\"><tr><td style=\"padding:2px 0 0 20px;\"><p style=\"margin:0 0 10px 0;font-size:13px;line-height:1.9;color:#272424;\">{{body}}</p><p style=\"margin:0;font-size:12px;color:#5b6b7a;\">{title}</p></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "cta_primary": {
+      "kind": "button",
+      "desktop_id": "w-cta_primary",
+      "mobile_id": "w-cta_primary"
+    }
+  }
+}

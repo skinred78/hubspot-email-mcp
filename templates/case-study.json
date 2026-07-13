@@ -1,0 +1,71 @@
+{
+  "template_id": "217060934476",
+  "name": "TEMPLATE - Case study",
+  "slots": {
+    "hero": {
+      "kind": "text",
+      "desktop_id": "w-hero",
+      "mobile_id": "w-hero"
+    },
+    "stat_1": {
+      "kind": "text",
+      "desktop_id": "w-stat_1-d",
+      "mobile_id": "w-stat_1-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td align=\"center\" style=\"padding:22px 12px;\"><div style=\"font-family:Arial,sans-serif;font-size:32px;font-weight:700;color:#BA2532;line-height:1;\">{{title}}</div><div style=\"font-size:12px;color:#5b6b7a;line-height:1.6;margin-top:10px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td align=\"center\" style=\"padding:18px 12px;\"><div style=\"font-family:Arial,sans-serif;font-size:26px;font-weight:700;color:#BA2532;line-height:1;\">{{title}}</div><div style=\"font-size:11px;color:#5b6b7a;line-height:1.6;margin-top:8px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "stat_2": {
+      "kind": "text",
+      "desktop_id": "w-stat_2-d",
+      "mobile_id": "w-stat_2-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td align=\"center\" style=\"padding:22px 12px;\"><div style=\"font-family:Arial,sans-serif;font-size:20px;font-weight:700;color:#023762;\">{{title}}</div><div style=\"font-size:12px;color:#5b6b7a;line-height:1.6;margin-top:12px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td align=\"center\" style=\"padding:18px 12px;\"><div style=\"font-family:Arial,sans-serif;font-size:17px;font-weight:700;color:#023762;\">{{title}}</div><div style=\"font-size:11px;color:#5b6b7a;line-height:1.6;margin-top:10px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "stat_3": {
+      "kind": "text",
+      "desktop_id": "w-stat_3-d",
+      "mobile_id": "w-stat_3-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td align=\"center\" style=\"padding:22px 12px;\"><div style=\"font-family:Arial,sans-serif;font-size:32px;font-weight:700;color:#BA2532;line-height:1;\">{{title}}</div><div style=\"font-size:12px;color:#5b6b7a;line-height:1.6;margin-top:10px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td align=\"center\" style=\"padding:18px 12px;\"><div style=\"font-family:Arial,sans-serif;font-size:26px;font-weight:700;color:#BA2532;line-height:1;\">{{title}}</div><div style=\"font-size:11px;color:#5b6b7a;line-height:1.6;margin-top:8px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "journal_cover": {
+      "kind": "image",
+      "desktop_id": "w-journal_cover-d",
+      "mobile_id": "w-journal_cover-m"
+    },
+    "figure_caption": {
+      "kind": "text",
+      "desktop_id": "w-figure_caption-d",
+      "mobile_id": "w-figure_caption-m"
+    },
+    "body_copy": {
+      "kind": "text",
+      "desktop_id": "w-body_copy",
+      "mobile_id": "w-body_copy"
+    },
+    "signoff_text": {
+      "kind": "text",
+      "desktop_id": "w-signoff_text-d",
+      "mobile_id": "w-signoff_text-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-left:3px solid #BA2532;\"><tr><td style=\"padding:2px 0 0 20px;\"><p style=\"margin:0 0 10px 0;font-size:14px;line-height:1.9;color:#272424;\">{{body}}</p><p style=\"margin:0;font-size:13px;color:#5b6b7a;\">{title}</p></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-left:3px solid #BA2532;\"><tr><td style=\"padding:2px 0 0 20px;\"><p style=\"margin:0 0 10px 0;font-size:13px;line-height:1.9;color:#272424;\">{{body}}</p><p style=\"margin:0;font-size:12px;color:#5b6b7a;\">{title}</p></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "cta_primary": {
+      "kind": "button",
+      "desktop_id": "w-cta_primary",
+      "mobile_id": "w-cta_primary"
+    }
+  }
+}

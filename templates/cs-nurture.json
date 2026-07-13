@@ -1,0 +1,66 @@
+{
+  "template_id": "217060934473",
+  "name": "TEMPLATE - CS Nurture (査読対策)",
+  "slots": {
+    "hero": {
+      "kind": "text",
+      "desktop_id": "w-hero",
+      "mobile_id": "w-hero"
+    },
+    "intro": {
+      "kind": "text",
+      "desktop_id": "w-intro",
+      "mobile_id": "w-intro"
+    },
+    "step_1": {
+      "kind": "text",
+      "desktop_id": "w-step_1-d",
+      "mobile_id": "w-step_1-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:20px 18px;\"><div style=\"font-family:Arial,sans-serif;font-size:13px;font-weight:700;color:#BA2532;letter-spacing:1px;\">STEP 1</div><div style=\"font-size:15px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:12.5px;color:#5b6b7a;line-height:1.75;margin-top:6px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:16px 14px;\"><div style=\"font-family:Arial,sans-serif;font-size:12px;font-weight:700;color:#BA2532;letter-spacing:1px;\">STEP 1</div><div style=\"font-size:13px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:11.5px;color:#5b6b7a;line-height:1.75;margin-top:6px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "step_2": {
+      "kind": "text",
+      "desktop_id": "w-step_2-d",
+      "mobile_id": "w-step_2-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:20px 18px;\"><div style=\"font-family:Arial,sans-serif;font-size:13px;font-weight:700;color:#BA2532;letter-spacing:1px;\">STEP 2</div><div style=\"font-size:15px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:12.5px;color:#5b6b7a;line-height:1.75;margin-top:6px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:16px 14px;\"><div style=\"font-family:Arial,sans-serif;font-size:12px;font-weight:700;color:#BA2532;letter-spacing:1px;\">STEP 2</div><div style=\"font-size:13px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:11.5px;color:#5b6b7a;line-height:1.75;margin-top:6px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "step_3": {
+      "kind": "text",
+      "desktop_id": "w-step_3-d",
+      "mobile_id": "w-step_3-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:20px 18px;\"><div style=\"font-family:Arial,sans-serif;font-size:13px;font-weight:700;color:#BA2532;letter-spacing:1px;\">STEP 3</div><div style=\"font-size:15px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:12.5px;color:#5b6b7a;line-height:1.75;margin-top:6px;\">{{body}}</div></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#F5F5F5;border-radius:12px;\"><tr><td style=\"padding:16px 14px;\"><div style=\"font-family:Arial,sans-serif;font-size:12px;font-weight:700;color:#BA2532;letter-spacing:1px;\">STEP 3</div><div style=\"font-size:13px;font-weight:700;color:#023762;line-height:1.5;margin-top:8px;\">{{title}}</div><div style=\"font-size:11.5px;color:#5b6b7a;line-height:1.75;margin-top:6px;\">{{body}}</div></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "signoff_text": {
+      "kind": "text",
+      "desktop_id": "w-signoff_text-d",
+      "mobile_id": "w-signoff_text-m",
+      "wrapper": {
+        "desktop": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-left:3px solid #BA2532;\"><tr><td style=\"padding:2px 0 0 20px;\"><p style=\"margin:0 0 10px 0;font-size:14px;line-height:1.9;color:#272424;\">{{body}}</p><p style=\"margin:0;font-size:13px;color:#5b6b7a;\">{title}</p></td></tr></table>",
+        "mobile": "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border-left:3px solid #BA2532;\"><tr><td style=\"padding:2px 0 0 20px;\"><p style=\"margin:0 0 10px 0;font-size:13px;line-height:1.9;color:#272424;\">{{body}}</p><p style=\"margin:0;font-size:12px;color:#5b6b7a;\">{title}</p></td></tr></table>"
+      },
+      "content_kind": "title_body"
+    },
+    "cta_primary": {
+      "kind": "button",
+      "desktop_id": "w-cta_primary",
+      "mobile_id": "w-cta_primary"
+    },
+    "cta_caption": {
+      "kind": "text",
+      "desktop_id": "w-cta_caption",
+      "mobile_id": "w-cta_caption"
+    }
+  }
+}
