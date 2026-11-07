@@ -233,9 +233,15 @@ if _SERVER_URL:
         # model (a browser rebinding DNS to a localhost server) doesn't apply to a public
         # TLS server gated by OAuth, so disable it.
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        # Stateless HTTP: each request gets a fresh transport that is dropped when the
+        # request ends. In the default stateful mode the session manager keeps every
+        # session in memory until the client sends DELETE, which Claude.ai clients rarely
+        # do, so memory grew about 20 MB a day on Railway (Nov 2026). No tool here uses
+        # a session (no Context, sampling, elicitation or progress), so nothing is lost.
+        stateless_http=True,
     )
 else:
-    mcp = FastMCP("hubspot-email")
+    mcp = FastMCP("hubspot-email", stateless_http=True)
 
 
 @mcp.custom_route("/health", methods=["GET"])
